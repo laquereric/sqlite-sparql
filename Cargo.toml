@@ -1,0 +1,43 @@
+[package]
+name = "sqlite-sparql"
+version = "0.1.0"
+edition = "2021"
+authors = ["sqlite-sparql contributors"]
+description = "A SQLite loadable extension that embeds Oxigraph for RDF triple storage and SPARQL querying"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/sqlite-sparql"
+keywords = ["sqlite", "rdf", "sparql", "oxigraph", "semantic-web"]
+categories = ["database", "web-programming"]
+
+[lib]
+# cdylib produces the loadable .so/.dylib/.dll for SQLite
+# rlib allows the crate to be used as a Rust library in tests
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# SQLite loadable extension framework
+sqlite-loadable = "0.0.5"
+
+# Oxigraph: embedded RDF/SPARQL engine written in Rust
+oxigraph = "0.4"
+
+# Serialization helpers
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "1"
+
+[dev-dependencies]
+# For integration tests via rusqlite
+# `load_extension` enables Connection::load_extension to load our cdylib;
+# `bundled` ships its own libsqlite3 so we don't depend on the system one.
+rusqlite = { version = "0.32", features = ["load_extension", "bundled"] }
+tempfile = "3"
+
+[profile.release]
+# Optimize for size and speed in the loadable extension
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
