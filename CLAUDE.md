@@ -103,10 +103,12 @@ areas when the first `cargo build` runs:
 - `api::value_type` / `api::ValueType` — may be named differently; check
   `sqlite_loadable::api` docs.
 
-### 2. Named Graph Support
-Currently all triples are forced into the **default graph**. To support named
-graphs, add a fourth `graph` column to `rdf_triples` and update
-`store.rs` to use `GraphName::NamedNode`.
+### 2. Named Graph Support — DONE in 0.3.0
+4-arg `rdf_insert`/`rdf_delete`, 1-arg `rdf_count`, `rdf_count_all`,
+HIDDEN `graph` column on the `rdf_triples` vtab, and SPARQL routing
+via standard `GRAPH`/`FROM`/`FROM NAMED` clauses. See
+`docs/plans/PLAN_0.3.0.md`. Blank-node graphs are deliberately rejected
+to keep the boundary narrow.
 
 ### 3. SPARQL UPDATE (SPARQL 1.1 Update)
 Oxigraph supports SPARQL Update via `store.update(query)`. Add a

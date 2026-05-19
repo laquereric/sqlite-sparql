@@ -46,8 +46,16 @@ MM breaks downstream.
 
 - `rdf_insert(subject TEXT, predicate TEXT, object TEXT) → 1` — idempotent;
   re-inserting the same triple is a no-op.
-- `rdf_delete(subject TEXT, predicate TEXT, object TEXT) → 1`.
-- `rdf_count() → INTEGER` — used by MM's `bin/mm-smoke` semantica step.
+- `rdf_insert(subject TEXT, predicate TEXT, object TEXT, graph TEXT) → 1`
+  (from 0.3.0) — same shape, routes into a named graph. `graph = NULL`
+  is the default graph.
+- `rdf_delete(subject TEXT, predicate TEXT, object TEXT[, graph TEXT]) → 1`
+  — symmetric.
+- `rdf_count() → INTEGER` — default-graph count, used by MM's
+  `bin/mm-smoke` semantica step.
+- `rdf_count(graph TEXT) → INTEGER` (from 0.3.0) — count within a named
+  graph; `NULL` is the default graph.
+- `rdf_count_all() → INTEGER` (from 0.3.0) — count across every graph.
 
 ### SPARQL querying
 
@@ -64,9 +72,14 @@ MM breaks downstream.
 ### Virtual table
 
 - `rdf_triples` virtual table — `(subject, predicate, object)` columns,
-  read + write. MM does **not** read this directly today, but
-  `rails-semantica` may use it for bulk operations; if so, it's named in
-  `rails-semantica`'s consumer requirement.
+  read + write. From 0.3.0 the vtab also exposes a HIDDEN `graph`
+  column: `SELECT *` and 3-column `INSERT VALUES` are unchanged, and
+  the graph is readable/writeable when named explicitly
+  (`SELECT subject, graph FROM triples`,
+  `INSERT INTO triples(subject, predicate, object, graph) VALUES (…)`).
+  MM does **not** read this directly today, but `rails-semantica` may
+  use it for bulk operations; if so, it's named in `rails-semantica`'s
+  consumer requirement.
 
 ### Term encoding
 
@@ -167,47 +180,39 @@ patching the gem from within MM. Both boundaries stay bright.
 > `docs/plans/PLAN_0.4.0.md`). The functional contracts below are
 > unchanged; only the version labels move.
 
-### Named graph support (toward 0.3.0)
+### Named graph support — LANDED in 0.3.0
 
-`CLAUDE.md` § "Completing the Implementation" #2 already names this as
-planned upstream work; this section pins it as a load-bearing dependency
-for MM's PLAN_0_29_1 Phase B.2 cutover. MM's legacy `Triple` AR model +
-`ProductTripler` service write triples to a named graph (`"bhphoto"`)
-in addition to the default graph; full deletion of the legacy table
-requires the engine to accept named-graph reads + writes through both
-the SQL-function surface and the SPARQL surface.
+This section previously documented MM's requested surface. It is now
+satisfied — `docs/plans/PLAN_0.3.0.md` is implemented, see § "Triple
+management" and § "Virtual table" above for the live contract. The
+previously-stated MM expectations all hold:
 
-Specific MM expectations:
+- `rdf_insert(subject, predicate, object, graph)` — 4th arg is the
+  graph IRI (`NULL` for default). ✓
+- `rdf_delete(…)` — same shape. ✓
+- `sparql_query`, `sparql_ask`, `sparql_construct` — accept
+  `FROM <graph>` / `FROM NAMED <graph>` / `GRAPH <graph> { … }`. ✓
+  (passes straight through to Oxigraph 0.4)
+- `rdf_triples` vtab — gains a HIDDEN `graph` column readable by name
+  and writeable through a 4-column `INSERT`. ✓
+- `rdf_count(graph)` — counts within a named graph; `NULL` is the
+  default. `rdf_count_all()` covers the cross-graph case. ✓
 
-- `rdf_insert(subject, predicate, object, graph)` — fourth argument is
-  the graph IRI (or `NULL` for default graph).
-- `rdf_delete(...)` — same fourth-argument shape.
-- `sparql_query`, `sparql_ask`, `sparql_construct` — accept SPARQL 1.1
-  `FROM <graph>` / `FROM NAMED <graph>` / `GRAPH <graph> { … }`
-  expressions; engine routes queries to the right graph(s).
-- `rdf_triples` virtual table — gains a `graph` column on read; writes
-  honor an INSERT-time `graph` argument.
-- `rdf_count(graph)` — optional argument; counts within a named graph
-  (or all graphs if omitted).
+Backward compatibility holds: every 0.1.0 / 0.2.0 caller works unchanged.
 
-Backward compatibility: the existing 3-arg `rdf_insert(s, p, o)` MUST
-keep emitting into the default graph (so existing operators don't
-break). The 4-arg form is additive. Same for the rest — every existing
-zero-graph signature stays valid, and the named-graph variant rides
-alongside.
+### Acceptance signal (named graph) — UPSTREAM READY
 
-### Acceptance signal (named graph)
+The upstream side of this acceptance signal is complete as of `v0.3.0`.
+The MM-side work remains:
 
-When named-graph support lands, MM:
-
-1. Bumps the `sqlite-sparql` submodule SHA in MM + the matching
-   `rails-semantica` SHA (which surfaces the graph parameter through
-   its Storable DSL — see
+1. Bump the `sqlite-sparql` submodule SHA in MM to `v0.3.0` + the
+   matching `rails-semantica` SHA (which surfaces the graph parameter
+   through its Storable DSL — see
    [`rails-semantica/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/rails-semantica/blob/main/CONSUMER_REQUIREMENT_MM.md#5-named-graph-parameter)).
-2. Migrates its data: re-emits `ProductTripler`'s existing output into
-   the `"bhphoto"` graph; deletes the legacy `triples` AR table.
-3. Updates this file: the named-graph surface graduates from
-   "Requested" into "SQL surfaces MM consumes."
+2. Migrate the data: re-emit `ProductTripler`'s existing output into
+   the `"bhphoto"` graph; delete the legacy `triples` AR table.
+3. The "Triple management" + "Virtual table" sections above already
+   list the named-graph surface as live.
 
 ### Array-argument batched insert (`rdf_insert_many`, toward 0.4.0)
 

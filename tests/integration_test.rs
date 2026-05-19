@@ -418,4 +418,178 @@ mod tests {
         conn_a.execute_batch("SELECT rdf_clear();")?;
         Ok(())
     }
+
+    // ── 0.3.0 named graphs ────────────────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn test_rdf_insert_4arg_named_graph() -> Result<()> {
+        let conn = open_with_extension()?;
+
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/s1','http://e/p','http://e/o1');
+             SELECT rdf_insert('http://e/s2','http://e/p','http://e/o2','urn:g:bhphoto');
+             SELECT rdf_insert('http://e/s3','http://e/p','http://e/o3', NULL);",
+        )?;
+
+        let default_count: i64 =
+            conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        let default_null: i64 =
+            conn.query_row("SELECT rdf_count(NULL)", [], |r| r.get(0))?;
+        let bhphoto_count: i64 = conn.query_row(
+            "SELECT rdf_count(?)",
+            rusqlite::params!["urn:g:bhphoto"],
+            |r| r.get(0),
+        )?;
+        let all_count: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+
+        assert_eq!(default_count, 2, "default graph: s1 + s3 (NULL graph)");
+        assert_eq!(default_null, 2, "rdf_count(NULL) must equal rdf_count()");
+        assert_eq!(bhphoto_count, 1, "named graph holds only s2");
+        assert_eq!(all_count, 3, "rdf_count_all spans every graph");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_delete_4arg_named_graph() -> Result<()> {
+        let conn = open_with_extension()?;
+
+        // Same triple shape in default and named graph — deletion in one
+        // must not affect the other.
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/s','http://e/p','http://e/o');
+             SELECT rdf_insert('http://e/s','http://e/p','http://e/o','urn:g:bhphoto');",
+        )?;
+
+        let n: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(n, 2);
+
+        conn.execute_batch(
+            "SELECT rdf_delete('http://e/s','http://e/p','http://e/o','urn:g:bhphoto');",
+        )?;
+
+        assert_eq!(
+            conn.query_row::<i64, _, _>(
+                "SELECT rdf_count('urn:g:bhphoto')",
+                [],
+                |r| r.get(0)
+            )?,
+            0,
+            "named-graph triple removed"
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT rdf_count()", [], |r| r.get(0))?,
+            1,
+            "default-graph copy is untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_insert_4arg_rejects_blank_graph() -> Result<()> {
+        let conn = open_with_extension()?;
+        let err = conn
+            .execute_batch(
+                "SELECT rdf_insert('http://e/s','http://e/p','http://e/o','_:b0');",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("blank-node graphs"),
+            "expected blank-node rejection, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_query_graph_clause() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/in_default','http://e/p','http://e/o');
+             SELECT rdf_insert('http://e/in_bhphoto','http://e/p','http://e/o','urn:g:bhphoto');
+             SELECT rdf_insert('http://e/in_other','http://e/p','http://e/o','urn:g:other');",
+        )?;
+
+        // GRAPH-bound query — bhphoto only.
+        let json: String = conn.query_row(
+            "SELECT sparql_query('SELECT ?s WHERE { GRAPH <urn:g:bhphoto> { ?s ?p ?o } }')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(json.contains("in_bhphoto"), "got: {json}");
+        assert!(!json.contains("in_default"), "got: {json}");
+        assert!(!json.contains("in_other"), "got: {json}");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_query_default_dataset_isolates() -> Result<()> {
+        // Confirms Oxigraph's default-dataset semantics: an unqualified
+        // `?s ?p ?o` query returns only the default graph, not the union
+        // of every graph. If this ever flips, downstream consumers will
+        // start seeing named-graph triples they didn't ask for.
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/d','http://e/p','http://e/o');
+             SELECT rdf_insert('http://e/n','http://e/p','http://e/o','urn:g:bhphoto');",
+        )?;
+        let json: String = conn.query_row(
+            "SELECT sparql_query('SELECT ?s WHERE { ?s ?p ?o }')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(json.contains("http://e/d"), "got: {json}");
+        assert!(!json.contains("http://e/n"), "named-graph triple leaked: {json}");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_vtab_named_graph_round_trip() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE triples USING rdf_triples();
+             INSERT INTO triples(subject, predicate, object, graph) VALUES (
+               'http://e/iris', 'http://e/p', '\"Iris\"', 'urn:g:bhphoto'
+             );",
+        )?;
+        // Read graph column explicitly.
+        let g: String = conn.query_row(
+            "SELECT graph FROM triples WHERE subject = '<http://e/iris>'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(g, "urn:g:bhphoto");
+        // graph column is HIDDEN — SELECT * gives three columns only.
+        let visible_cols: i64 = conn
+            .prepare("SELECT * FROM triples LIMIT 1")?
+            .column_count() as i64;
+        assert_eq!(visible_cols, 3, "graph is HIDDEN; SELECT * is still 3 cols");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_vtab_default_graph_compat() -> Result<()> {
+        // The 0.1.0/0.2.0 3-column INSERT VALUES form must keep working
+        // unchanged after the graph column was added.
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE triples USING rdf_triples();
+             INSERT INTO triples VALUES (
+               'http://e/legacy', 'http://e/p', 'http://e/o'
+             );",
+        )?;
+        let g: Option<String> = conn.query_row(
+            "SELECT graph FROM triples WHERE subject = '<http://e/legacy>'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(g.is_none(), "missing graph means default graph; got: {g:?}");
+        Ok(())
+    }
 }

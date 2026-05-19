@@ -15,7 +15,11 @@ use oxigraph::io::{RdfFormat, RdfParser};
 use sqlite_loadable::{api, define_scalar_function, prelude::*, FunctionFlags};
 
 use crate::error::SparqlError;
-use crate::store::{clear_store, delete_triple, insert_triple, triple_count, with_store};
+use crate::store::{
+    clear_store, delete_triple, delete_triple_in_graph, insert_triple,
+    insert_triple_in_graph, triple_count, triple_count_all, triple_count_in_graph, with_store,
+};
+use sqlite_loadable::api::ValueType;
 
 // ── rdf_insert ────────────────────────────────────────────────────────────────
 
@@ -28,6 +32,21 @@ pub fn rdf_insert_fn(
     let o = api::value_text(values.get(2).expect("object"))?;
 
     insert_triple(s, p, o).map_err(sqlite_loadable::Error::from)?;
+    api::result_int(context, 1);
+    Ok(())
+}
+
+/// 4-arg form: `rdf_insert(s, p, o, graph)`. `graph = NULL` → default graph.
+pub fn rdf_insert_g_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let s = api::value_text(values.get(0).expect("subject"))?;
+    let p = api::value_text(values.get(1).expect("predicate"))?;
+    let o = api::value_text(values.get(2).expect("object"))?;
+    let g = graph_arg(values.get(3).expect("graph"))?;
+
+    insert_triple_in_graph(s, p, o, g).map_err(sqlite_loadable::Error::from)?;
     api::result_int(context, 1);
     Ok(())
 }
@@ -47,6 +66,30 @@ pub fn rdf_delete_fn(
     Ok(())
 }
 
+/// 4-arg form: `rdf_delete(s, p, o, graph)`. `graph = NULL` → default graph.
+pub fn rdf_delete_g_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let s = api::value_text(values.get(0).expect("subject"))?;
+    let p = api::value_text(values.get(1).expect("predicate"))?;
+    let o = api::value_text(values.get(2).expect("object"))?;
+    let g = graph_arg(values.get(3).expect("graph"))?;
+
+    delete_triple_in_graph(s, p, o, g).map_err(sqlite_loadable::Error::from)?;
+    api::result_int(context, 1);
+    Ok(())
+}
+
+fn graph_arg<'a>(v: &'a *mut sqlite3_value) -> sqlite_loadable::Result<Option<&'a str>> {
+    if api::value_type(v) == ValueType::Null {
+        Ok(None)
+    } else {
+        let s = api::value_text(v)?;
+        Ok(Some(s))
+    }
+}
+
 // ── rdf_clear ─────────────────────────────────────────────────────────────────
 
 pub fn rdf_clear_fn(
@@ -60,11 +103,34 @@ pub fn rdf_clear_fn(
 
 // ── rdf_count ─────────────────────────────────────────────────────────────────
 
+/// `rdf_count()` — count in the default graph (0.1.0 surface, unchanged).
 pub fn rdf_count_fn(
     context: *mut sqlite3_context,
     _values: &[*mut sqlite3_value],
 ) -> sqlite_loadable::Result<()> {
     let count = triple_count();
+    api::result_int(context, count as i32);
+    Ok(())
+}
+
+/// `rdf_count(graph)` — count in a specific graph. `NULL` means the default
+/// graph (same as zero-arg `rdf_count()`).
+pub fn rdf_count_g_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let g = graph_arg(values.get(0).expect("graph"))?;
+    let count = triple_count_in_graph(g);
+    api::result_int(context, count as i32);
+    Ok(())
+}
+
+/// `rdf_count_all()` — count across every graph including the default.
+pub fn rdf_count_all_fn(
+    context: *mut sqlite3_context,
+    _values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let count = triple_count_all();
     api::result_int(context, count as i32);
     Ok(())
 }
@@ -224,9 +290,13 @@ fn dump_ntriples() -> crate::error::Result<String> {
 /// Register all RDF triple management functions on the given database connection.
 pub fn register(db: *mut sqlite3) -> sqlite_loadable::Result<()> {
     define_scalar_function(db, "rdf_insert", 3, rdf_insert_fn, FunctionFlags::UTF8)?;
+    define_scalar_function(db, "rdf_insert", 4, rdf_insert_g_fn, FunctionFlags::UTF8)?;
     define_scalar_function(db, "rdf_delete", 3, rdf_delete_fn, FunctionFlags::UTF8)?;
+    define_scalar_function(db, "rdf_delete", 4, rdf_delete_g_fn, FunctionFlags::UTF8)?;
     define_scalar_function(db, "rdf_clear", 0, rdf_clear_fn, FunctionFlags::UTF8)?;
     define_scalar_function(db, "rdf_count", 0, rdf_count_fn, FunctionFlags::UTF8)?;
+    define_scalar_function(db, "rdf_count", 1, rdf_count_g_fn, FunctionFlags::UTF8)?;
+    define_scalar_function(db, "rdf_count_all", 0, rdf_count_all_fn, FunctionFlags::UTF8)?;
     define_scalar_function(
         db,
         "rdf_load_turtle",

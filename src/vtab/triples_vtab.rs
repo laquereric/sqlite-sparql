@@ -1,13 +1,19 @@
 /// `rdf_triples` — a read/write virtual table over the Oxigraph triple store.
 ///
-/// This virtual table exposes the contents of the thread-local Oxigraph store
-/// as a regular SQLite table with three columns:
+/// Logical columns (from 0.3.0):
 ///
-/// | Column    | Type | Description                              |
-/// |-----------|------|------------------------------------------|
-/// | subject   | TEXT | N-Triples encoded subject term           |
-/// | predicate | TEXT | N-Triples encoded predicate (IRI)        |
-/// | object    | TEXT | N-Triples encoded object term            |
+/// | Column    | Type | Visible in `SELECT *`? | Description                              |
+/// |-----------|------|------------------------|------------------------------------------|
+/// | subject   | TEXT | yes                    | N-Triples encoded subject term           |
+/// | predicate | TEXT | yes                    | N-Triples encoded predicate IRI          |
+/// | object    | TEXT | yes                    | N-Triples encoded object term            |
+/// | graph     | TEXT | no (HIDDEN)            | Graph IRI; `NULL` for the default graph  |
+///
+/// `graph` is declared HIDDEN so that
+/// `INSERT INTO triples VALUES (s, p, o)` and `SELECT * FROM triples`
+/// keep the 0.1.0 / 0.2.0 shape. Query it by name (`WHERE graph = '…'`)
+/// and provide it on writes by naming all four columns
+/// (`INSERT INTO triples(subject, predicate, object, graph) VALUES (…)`).
 ///
 /// ## DDL
 /// ```sql
@@ -16,21 +22,23 @@
 ///
 /// ## DML
 /// ```sql
-/// -- Insert a triple
+/// -- 3-col INSERT — lands in the default graph (compat path)
 /// INSERT INTO triples VALUES (
 ///   'http://example.org/alice',
 ///   'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
 ///   'http://xmlns.com/foaf/0.1/Person'
 /// );
 ///
-/// -- Query triples
-/// SELECT * FROM triples;
+/// -- Named graph INSERT — must name all four columns
+/// INSERT INTO triples(subject, predicate, object, graph) VALUES (
+///   'http://example.org/alice',
+///   'http://xmlns.com/foaf/0.1/name',
+///   '"Alice"',
+///   'urn:g:bhphoto'
+/// );
 ///
-/// -- Delete a triple
-/// DELETE FROM triples
-///  WHERE subject   = 'http://example.org/alice'
-///    AND predicate = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
-///    AND object    = 'http://xmlns.com/foaf/0.1/Person';
+/// -- Read the graph column explicitly
+/// SELECT subject, graph FROM triples WHERE graph = 'urn:g:bhphoto';
 /// ```
 use sqlite_loadable::{
     prelude::*,
@@ -39,8 +47,8 @@ use sqlite_loadable::{
 };
 
 use crate::functions::sparql_query::{term_to_ntriples, term_to_ntriples_subject};
-use crate::store::{insert_triple, with_store};
-use oxigraph::model::{GraphNameRef, Term};
+use crate::store::{insert_triple_in_graph, with_store};
+use oxigraph::model::{GraphName, Term};
 use std::marker::PhantomData;
 use std::mem;
 use std::os::raw::c_int;
@@ -48,7 +56,7 @@ use std::os::raw::c_int;
 // ── Virtual table definition ──────────────────────────────────────────────────
 
 static CREATE_SQL: &str =
-    "CREATE TABLE x(subject TEXT, predicate TEXT, object TEXT)";
+    "CREATE TABLE x(subject TEXT, predicate TEXT, object TEXT, graph TEXT HIDDEN)";
 
 #[repr(C)]
 pub struct RdfTriplesTable {
@@ -91,25 +99,32 @@ impl<'vtab> VTabWriteable<'vtab> for RdfTriplesTable {
         operation: UpdateOperation,
         _p_rowid: *mut i64,
     ) -> Result<()> {
-        use sqlite_loadable::api;
+        use sqlite_loadable::api::{self, ValueType};
 
         match operation {
             UpdateOperation::Insert { values, rowid: _ } => {
                 let s = api::value_text(&values[0])?;
                 let p = api::value_text(&values[1])?;
                 let o = api::value_text(&values[2])?;
-                insert_triple(s, p, o).map_err(Error::from)?;
+                // `graph` is HIDDEN; on a 3-column INSERT VALUES (...) call
+                // SQLite passes NULL for the 4th. Treat NULL as default graph.
+                let graph_opt: Option<&str> = match values.get(3) {
+                    Some(v) if api::value_type(v) == ValueType::Null => None,
+                    Some(v) => Some(api::value_text(v)?),
+                    None => None,
+                };
+                insert_triple_in_graph(s, p, o, graph_opt).map_err(Error::from)?;
                 Ok(())
             }
             // 0.1.0: rowid-driven DELETE/UPDATE on rdf_triples is not supported
             // because the cursor's rowid is a position in a per-cursor materialised
             // scan, with no stable mapping back to a triple. Users should use
-            // rdf_delete(s, p, o) or a SPARQL DELETE query instead.
+            // rdf_delete(s, p, o[, graph]) or a SPARQL DELETE query instead.
             UpdateOperation::Delete(_) => Err(Error::new_message(
-                "DELETE on rdf_triples is not supported in 0.1.x — use rdf_delete(s,p,o) or SPARQL DELETE",
+                "DELETE on rdf_triples is not supported — use rdf_delete(s,p,o[,graph]) or SPARQL DELETE",
             )),
             UpdateOperation::Update { .. } => Err(Error::new_message(
-                "UPDATE on rdf_triples is not supported in 0.1.x — use rdf_delete + rdf_insert",
+                "UPDATE on rdf_triples is not supported — use rdf_delete + rdf_insert",
             )),
         }
     }
@@ -117,12 +132,16 @@ impl<'vtab> VTabWriteable<'vtab> for RdfTriplesTable {
 
 // ── Cursor ────────────────────────────────────────────────────────────────────
 
+/// Materialised row from the store. `graph` is `None` for the default graph,
+/// `Some(iri)` for a named graph.
+type Row = (String, String, String, Option<String>);
+
 #[repr(C)]
 pub struct RdfTriplesCursor<'vtab> {
     /// SQLite requires the `sqlite3_vtab_cursor` base struct as the first
     /// field of every concrete cursor type.
     base: sqlite3_vtab_cursor,
-    rows: Vec<(String, String, String)>,
+    rows: Vec<Row>,
     pos: usize,
     _phantom: PhantomData<&'vtab RdfTriplesTable>,
 }
@@ -145,20 +164,24 @@ impl<'vtab> VTabCursor for RdfTriplesCursor<'vtab> {
         _idx_str: Option<&str>,
         _values: &[*mut sqlite3_value],
     ) -> Result<()> {
-        // Load all quads from the default graph into our row buffer.
+        // Scan every graph (default + named). Passing `None` for the graph
+        // filter means "all graphs" in Oxigraph's API.
         self.rows = with_store(|store| {
             let mut rows = Vec::new();
-            for quad in store.quads_for_pattern(
-                None,
-                None,
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            ) {
+            for quad in store.quads_for_pattern(None, None, None, None) {
                 if let Ok(quad) = quad {
                     let s = term_to_ntriples_subject(&quad.subject);
                     let p = format!("<{}>", quad.predicate.as_str());
                     let o = term_to_ntriples(&Term::from(quad.object));
-                    rows.push((s, p, o));
+                    let g = match &quad.graph_name {
+                        GraphName::DefaultGraph => None,
+                        GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+                        // Blank-node graphs aren't a write path we accept, but
+                        // an Oxigraph-internal one might still appear. Encode
+                        // it as N-Triples so reads remain lossless.
+                        GraphName::BlankNode(b) => Some(format!("_:{}", b.as_str())),
+                    };
+                    rows.push((s, p, o, g));
                 }
             }
             rows
@@ -183,6 +206,10 @@ impl<'vtab> VTabCursor for RdfTriplesCursor<'vtab> {
                 0 => api::result_text(context, &row.0)?,
                 1 => api::result_text(context, &row.1)?,
                 2 => api::result_text(context, &row.2)?,
+                3 => match &row.3 {
+                    None => api::result_null(context),
+                    Some(g) => api::result_text(context, g)?,
+                },
                 _ => api::result_null(context),
             }
         }

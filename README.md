@@ -12,20 +12,31 @@ the premier framework for writing SQLite extensions in Rust.
 
 ## Features
 
-- **`rdf_insert(s, p, o)`** — Insert RDF triples using N-Triples term syntax
-- **`rdf_delete(s, p, o)`** — Delete triples
-- **`rdf_clear()`** — Reset the in-memory store
-- **`rdf_count()`** — Count triples in the store
+- **`rdf_insert(s, p, o)`** / **`rdf_insert(s, p, o, graph)`** — Insert
+  RDF triples using N-Triples term syntax. The 4-arg form routes the
+  triple into a named graph; `graph = NULL` is the default graph.
+- **`rdf_delete(s, p, o)`** / **`rdf_delete(s, p, o, graph)`** — Delete
+  triples; same `graph` semantics as `rdf_insert`.
+- **`rdf_clear()`** — Empty the in-memory store
+- **`rdf_count()`** / **`rdf_count(graph)`** — Count triples in the
+  default graph (zero-arg) or in a named graph (`NULL` = default).
+- **`rdf_count_all()`** — Count triples across every graph
 - **`rdf_load_turtle(text)`** — Bulk-load from Turtle format
 - **`rdf_load_ntriples(text)`** — Bulk-load from N-Triples format
 - **`rdf_load_rdfxml(text)`** — Bulk-load from RDF/XML format
 - **`rdf_dump_ntriples()`** — Serialise all triples as N-Triples
 - **`rdf_term_type(term)`** — Returns `"iri"`, `"blank"`, or `"literal"`
 - **`rdf_term_value(term)`** — Extracts the plain string value from a term
-- **`sparql_query(query)`** — Execute a SPARQL SELECT → JSON array
+- **`sparql_query(query)`** — Execute a SPARQL SELECT → JSON array. SPARQL
+  1.1 `FROM <graph>`, `FROM NAMED <graph>`, and `GRAPH <graph> { … }`
+  clauses route the query through Oxigraph unchanged.
 - **`sparql_ask(query)`** — Execute a SPARQL ASK → `0` or `1`
 - **`sparql_construct(query)`** — Execute a SPARQL CONSTRUCT → N-Triples text
-- **`rdf_triples` virtual table** — Read/write SQL view of the triple store
+- **`rdf_triples` virtual table** — Read/write SQL view of the triple
+  store. Columns: `subject`, `predicate`, `object`, plus a HIDDEN `graph`
+  column (default graph = `NULL`). `SELECT *` and the 3-column `INSERT
+  VALUES` form keep the 0.2.0 shape; name the `graph` column explicitly
+  to read or write named graphs.
 
 ---
 
@@ -76,6 +87,34 @@ SELECT sparql_ask('ASK { <http://example.org/alice> ?p ?o }');  -- 1
 -- Virtual table
 CREATE VIRTUAL TABLE triples USING rdf_triples();
 SELECT * FROM triples;
+```
+
+### Named graphs
+
+```sql
+-- 4-arg form routes into a named graph
+SELECT rdf_insert(
+  'http://example.org/alice',
+  'http://xmlns.com/foaf/0.1/name',
+  '"Alice"',
+  'urn:graph:bhphoto'
+);
+
+-- Count by graph
+SELECT rdf_count();                       -- default graph only
+SELECT rdf_count('urn:graph:bhphoto');    -- named graph
+SELECT rdf_count_all();                   -- every graph
+
+-- SPARQL routing via standard GRAPH / FROM clauses
+SELECT sparql_query(
+  'SELECT ?s WHERE { GRAPH <urn:graph:bhphoto> { ?s ?p ?o } }'
+);
+
+-- Virtual table: name the graph column to read or write it
+INSERT INTO triples(subject, predicate, object, graph)
+VALUES ('http://example.org/x', 'http://example.org/p', '"v"', 'urn:graph:bhphoto');
+
+SELECT subject FROM triples WHERE graph = 'urn:graph:bhphoto';
 ```
 
 ### Bulk Load (Turtle)
@@ -175,8 +214,8 @@ wraps it in `OnceLock` only for lazy initialisation.
   drops every triple. The persistent RocksDB backend lands in a later
   release; until then, populate the store from a source of truth at
   boot or first access.
-- **No named graphs yet.** All triples live in the default graph.
-  Named-graph support is the next release (`docs/plans/PLAN_0.3.0.md`).
+- **Blank-node graphs are rejected.** Oxigraph supports them; we keep
+  the boundary narrow. Use IRI-named graphs.
 - **RDF 1.1 only.** RDF-star quoted triples are rejected with a clear
   error.
 
@@ -184,7 +223,11 @@ wraps it in `OnceLock` only for lazy initialisation.
 
 ## Roadmap
 
-- [ ] Named graph support (4th column on `rdf_triples`)
+- [x] Named graph support (4-arg `rdf_insert`/`rdf_delete`, hidden
+      `graph` column on `rdf_triples`, SPARQL `GRAPH` / `FROM`
+      routing) — landed in 0.3.0
+- [ ] Batched insert (`rdf_insert_many` / `rdf_delete_many`,
+      `docs/plans/PLAN_0.4.0.md`)
 - [ ] `sparql_update(query)` for SPARQL 1.1 Update
 - [ ] Persistent store via Oxigraph's RocksDB backend
 - [ ] `rdf_open(path)` to attach a persistent store

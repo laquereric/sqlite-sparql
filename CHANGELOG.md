@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.0 — named graphs
+
+Adds named-graph support across the full SQL surface. All existing
+zero- and three-argument signatures keep their 0.2.0 behaviour;
+named-graph variants ride alongside.
+
+### New SQL surface
+
+- `rdf_insert(s, p, o, graph)` — 4-arg form routes into a named graph.
+  `graph = NULL` is the default graph (same as the 3-arg form).
+  Blank-node graphs (`_:…`) are rejected with a clear error.
+- `rdf_delete(s, p, o, graph)` — mirror of insert.
+- `rdf_count(graph)` — 1-arg form counts quads in a named graph;
+  `NULL` is the default graph (same as `rdf_count()`).
+- `rdf_count_all()` — counts across every graph, default included.
+- `rdf_triples` virtual table now has a HIDDEN `graph` column:
+  - `SELECT *` still returns three columns
+  - `INSERT INTO triples VALUES (s, p, o)` still works (default graph)
+  - `INSERT INTO triples(subject, predicate, object, graph) VALUES (…)`
+    writes to a named graph
+  - `WHERE graph = 'urn:g:…'` / `WHERE graph IS NULL` filter on graph
+
+### SPARQL routing
+
+SPARQL 1.1 `FROM <graph>`, `FROM NAMED <graph>`, and `GRAPH <graph> { … }`
+clauses go straight through to Oxigraph — no extra plumbing needed.
+The default dataset for an unqualified `?s ?p ?o` query remains the
+default graph only; named-graph triples never leak in without an
+explicit `FROM` or `GRAPH` clause (pinned by
+`test_sparql_query_default_dataset_isolates`).
+
+### Backward compatibility
+
+Every 0.1.0 / 0.2.0 caller keeps working unchanged. The 3-arg forms,
+zero-arg `rdf_count()`, and the 3-column `SELECT * FROM triples` /
+`INSERT INTO triples VALUES (…)` shapes are unchanged in syntax and
+semantics.
+
+### Tests
+
+Six new integration tests (20 total, up from 13):
+`test_rdf_insert_4arg_named_graph`,
+`test_rdf_delete_4arg_named_graph`,
+`test_rdf_insert_4arg_rejects_blank_graph`,
+`test_sparql_query_graph_clause`,
+`test_sparql_query_default_dataset_isolates`,
+`test_vtab_named_graph_round_trip`,
+`test_vtab_default_graph_compat`.
+
 ## 0.2.0 — shared process-wide store
 
 Replaces the per-thread Oxigraph store from 0.1.0 with a single
