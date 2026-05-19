@@ -1,6 +1,6 @@
 [package]
 name = "sqlite-sparql"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["sqlite-sparql contributors"]
 description = "A SQLite loadable extension that embeds Oxigraph for RDF triple storage and SPARQL querying"
@@ -34,6 +34,9 @@ thiserror = "1"
 # `bundled` ships its own libsqlite3 so we don't depend on the system one.
 rusqlite = { version = "0.32", features = ["load_extension", "bundled"] }
 tempfile = "3"
+# The store is process-wide from 0.2.0 onward; integration tests must
+# run one at a time or they'll race each other through the shared store.
+serial_test = "3"
 
 [profile.release]
 # Optimize for size and speed in the loadable extension

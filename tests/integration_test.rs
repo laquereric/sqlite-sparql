@@ -11,6 +11,7 @@
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, Result};
+    use serial_test::serial;
 
     /// Helper: open an in-memory SQLite connection and load the extension.
     ///
@@ -25,12 +26,17 @@ mod tests {
             conn.load_extension(lib_path, Some("sqlite3_sqlitesparql_init"))?;
             drop(guard);
         }
+        // Since 0.2.0 the store is process-wide and shared across every
+        // connection on every thread, so cargo's parallel test runner
+        // would have tests stomp on each other without an explicit reset.
+        conn.execute_batch("SELECT rdf_clear();")?;
         Ok(conn)
     }
 
     // ── rdf_insert / rdf_count ────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_rdf_insert_and_count() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -56,6 +62,7 @@ mod tests {
     // ── rdf_delete ────────────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_rdf_delete() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -86,6 +93,7 @@ mod tests {
     // ── rdf_clear ─────────────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_rdf_clear() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -103,6 +111,7 @@ mod tests {
     // ── rdf_load_turtle ───────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_rdf_load_turtle() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -126,6 +135,7 @@ mod tests {
     // ── rdf_load_ntriples ─────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_rdf_load_ntriples() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -143,6 +153,7 @@ mod tests {
     // ── rdf_dump_ntriples ─────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_rdf_dump_ntriples() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -163,6 +174,7 @@ mod tests {
     // ── rdf_term_type / rdf_term_value ────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_term_helpers() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -204,6 +216,7 @@ mod tests {
     // ── sparql_query (SELECT) ─────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_sparql_select() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -228,6 +241,7 @@ mod tests {
     // ── sparql_ask ────────────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_sparql_ask() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -259,6 +273,7 @@ mod tests {
     // ── sparql_construct ──────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_sparql_construct() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -283,6 +298,7 @@ mod tests {
     // ── rdf_triples virtual table ─────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_virtual_table() -> Result<()> {
         let conn = open_with_extension()?;
 
@@ -309,52 +325,97 @@ mod tests {
         Ok(())
     }
 
-    // ── thread-local isolation ────────────────────────────────────────────────
+    // ── 0.2.0 store sharing ───────────────────────────────────────────────────
     //
-    // store.rs holds one Oxigraph store per thread. Two SQLite connections
-    // opened on two different threads must therefore see two independent
-    // triple stores. This locks in the design choice so a future refactor
-    // doesn't silently turn the store into a process-global singleton.
+    // 0.2.0 replaced the per-thread Oxigraph store with a single
+    // process-wide store (`OnceLock<Store>`). The two tests below pin
+    // that behaviour:
+    //
+    //  - cross-thread visibility: a triple inserted on thread A is
+    //    visible from a SQLite connection opened on thread B.
+    //  - same-thread cross-connection visibility: a triple inserted
+    //    via one Connection is visible from a second Connection on the
+    //    same thread (the common Rails pool case).
+    //
+    // Serial ordering is enforced by `#[serial]` on every test.
 
     #[test]
-    fn test_thread_local_isolation() -> Result<()> {
+    #[serial]
+    fn test_cross_thread_visibility() -> Result<()> {
         use std::sync::mpsc;
         use std::thread;
 
-        let (tx_a, rx) = mpsc::channel::<i64>();
-        let tx_b = tx_a.clone();
+        // Start clean.
+        let _ = open_with_extension()?;
 
+        let (tx, rx) = mpsc::channel::<()>();
         let ta = thread::spawn(move || {
-            let conn = open_with_extension().expect("thread A open");
+            let conn = Connection::open_in_memory().expect("thread A open");
+            unsafe {
+                let g = rusqlite::LoadExtensionGuard::new(&conn).unwrap();
+                conn.load_extension(
+                    env!("SQLITE_SPARQL_CDYLIB"),
+                    Some("sqlite3_sqlitesparql_init"),
+                )
+                .unwrap();
+                drop(g);
+            }
+            // Deliberately NOT calling rdf_clear() here — we want to
+            // observe state shared with the other thread.
             conn.execute_batch(
                 "SELECT rdf_insert('http://t.a/s','http://t.a/p','http://t.a/o');",
             )
             .expect("thread A insert");
-            let n: i64 = conn
-                .query_row("SELECT rdf_count()", [], |r| r.get(0))
-                .expect("thread A count");
-            tx_a.send(n).unwrap();
+            tx.send(()).unwrap();
         });
 
         let tb = thread::spawn(move || {
-            let conn = open_with_extension().expect("thread B open");
-            // Thread B does no inserts — should see an empty store.
+            rx.recv().unwrap(); // wait for thread A's write
+            let conn = Connection::open_in_memory().expect("thread B open");
+            unsafe {
+                let g = rusqlite::LoadExtensionGuard::new(&conn).unwrap();
+                conn.load_extension(
+                    env!("SQLITE_SPARQL_CDYLIB"),
+                    Some("sqlite3_sqlitesparql_init"),
+                )
+                .unwrap();
+                drop(g);
+            }
             let n: i64 = conn
                 .query_row("SELECT rdf_count()", [], |r| r.get(0))
                 .expect("thread B count");
-            tx_b.send(n).unwrap();
+            n
         });
 
         ta.join().unwrap();
-        tb.join().unwrap();
-
-        let mut counts: Vec<i64> = vec![rx.recv().unwrap(), rx.recv().unwrap()];
-        counts.sort_unstable();
+        let count_seen_by_b = tb.join().unwrap();
         assert_eq!(
-            counts,
-            vec![0, 1],
-            "Each thread must see its own store: one with 1 triple, one with 0"
+            count_seen_by_b, 1,
+            "Thread B must see thread A's write through the shared store"
         );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_shared_store_across_connections() -> Result<()> {
+        let conn_a = open_with_extension()?; // clears the store
+        let conn_b = open_with_extension()?;
+        // open_with_extension() called rdf_clear() twice; both connections
+        // share the same store, so the store is empty regardless.
+
+        conn_a.execute_batch(
+            "SELECT rdf_insert('http://shared/s','http://shared/p','http://shared/o');",
+        )?;
+
+        let n: i64 = conn_b.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(
+            n, 1,
+            "Conn B must see Conn A's write — the store is process-wide"
+        );
+
+        // Cleanup so we don't leak state into other tests.
+        conn_a.execute_batch("SELECT rdf_clear();")?;
         Ok(())
     }
 }

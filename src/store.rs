@@ -1,43 +1,45 @@
-/// Thread-local Oxigraph in-memory store.
-///
-/// SQLite extensions run in the same process as the host application.  We keep
-/// one Oxigraph `MemoryStore` per thread (matching SQLite's connection-per-thread
-/// model) so that concurrent reads from different connections do not race.
-///
-/// The store is lazily initialised on first use and lives for the lifetime of
-/// the thread.  A `CALL rdf_clear()` SQL function resets it.
+//! Process-wide Oxigraph in-memory store.
+//!
+//! One [`Store`] for the lifetime of the process, lazily initialised on
+//! first use and shared by every SQLite connection on every thread.
+//!
+//! Oxigraph 0.4's in-memory [`Store`] is internally concurrent — its
+//! `insert`, `remove`, `query`, and `clear` methods all take `&self` and
+//! it composes from `Arc`-shared indexes plus `DashMap` / `RwLock`
+//! interior synchronisation. Wrapping it in a `Mutex` or `RwLock` here
+//! would only add contention without buying any correctness.
+//!
+//! This is a deliberate departure from the per-thread store the
+//! extension shipped with in 0.1.0; see
+//! `docs/reviews/REVIEW_0.1.0.md` and `docs/plans/PLAN_0.2.0.md` for
+//! the reasoning.
+
 use oxigraph::model::*;
 use oxigraph::store::Store;
-use std::cell::RefCell;
+use std::sync::OnceLock;
 
-thread_local! {
-    /// The per-thread Oxigraph store.
-    static STORE: RefCell<Store> = RefCell::new(
+static STORE: OnceLock<Store> = OnceLock::new();
+
+fn store() -> &'static Store {
+    STORE.get_or_init(|| {
         Store::new().expect("failed to create Oxigraph in-memory store")
-    );
+    })
 }
 
-/// Execute a closure with a shared reference to the thread-local store.
+/// Execute a closure with a shared reference to the process-wide store.
 pub fn with_store<F, T>(f: F) -> T
 where
     F: FnOnce(&Store) -> T,
 {
-    STORE.with(|s| f(&s.borrow()))
+    f(store())
 }
 
-/// Execute a closure with a mutable reference to the thread-local store.
-pub fn with_store_mut<F, T>(f: F) -> T
-where
-    F: FnOnce(&Store) -> T,
-{
-    STORE.with(|s| f(&s.borrow()))
-}
-
-/// Reset (clear) the thread-local store.
-pub fn clear_store() {
-    STORE.with(|s| {
-        *s.borrow_mut() = Store::new().expect("failed to create new Oxigraph store");
-    });
+/// Remove every quad from the store. The store instance itself stays
+/// alive; future inserts go to the same `Store` object.
+pub fn clear_store() -> crate::error::Result<()> {
+    store()
+        .clear()
+        .map_err(|e| crate::error::SparqlError::StoreError(e.to_string()))
 }
 
 /// Insert a single triple (subject, predicate, object) into the default graph.
@@ -48,13 +50,10 @@ pub fn insert_triple(s: &str, p: &str, o: &str) -> crate::error::Result<()> {
     let object = parse_term(o)?;
 
     let quad = Quad::new(subject, predicate, object, GraphName::DefaultGraph);
-    STORE.with(|store| {
-        store
-            .borrow()
-            .insert(&quad)
-            .map(|_| ())
-            .map_err(|e| crate::error::SparqlError::StoreError(e.to_string()))
-    })
+    store()
+        .insert(&quad)
+        .map(|_| ())
+        .map_err(|e| crate::error::SparqlError::StoreError(e.to_string()))
 }
 
 /// Delete a single triple from the default graph.
@@ -65,18 +64,15 @@ pub fn delete_triple(s: &str, p: &str, o: &str) -> crate::error::Result<()> {
     let object = parse_term(o)?;
 
     let quad = Quad::new(subject, predicate, object, GraphName::DefaultGraph);
-    STORE.with(|store| {
-        store
-            .borrow()
-            .remove(&quad)
-            .map(|_| ())
-            .map_err(|e| crate::error::SparqlError::StoreError(e.to_string()))
-    })
+    store()
+        .remove(&quad)
+        .map(|_| ())
+        .map_err(|e| crate::error::SparqlError::StoreError(e.to_string()))
 }
 
 /// Count the number of quads in the default graph.
 pub fn triple_count() -> usize {
-    STORE.with(|store| store.borrow().len().unwrap_or(0))
+    store().len().unwrap_or(0)
 }
 
 // ── Parsing helpers ──────────────────────────────────────────────────────────
@@ -125,12 +121,10 @@ fn parse_term(s: &str) -> crate::error::Result<Term> {
 /// - `"text"@en`
 /// - `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`
 fn parse_literal(s: &str) -> crate::error::Result<Term> {
-    // Strip leading quote
     let rest = s.strip_prefix('"').ok_or_else(|| {
         crate::error::SparqlError::InvalidArgument(format!("expected opening quote in: {s}"))
     })?;
 
-    // Find the closing quote (last `"` before optional suffix)
     let close = rest.rfind('"').ok_or_else(|| {
         crate::error::SparqlError::InvalidArgument(format!("no closing quote in: {s}"))
     })?;

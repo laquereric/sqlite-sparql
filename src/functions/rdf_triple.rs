@@ -53,7 +53,7 @@ pub fn rdf_clear_fn(
     context: *mut sqlite3_context,
     _values: &[*mut sqlite3_value],
 ) -> sqlite_loadable::Result<()> {
-    clear_store();
+    clear_store().map_err(sqlite_loadable::Error::from)?;
     api::result_int(context, 1);
     Ok(())
 }

@@ -157,15 +157,28 @@ SQLite connection
 │             │                       │
 │             ▼                       │
 │   ┌──────────────────┐              │
-│   │  Thread-local    │              │
+│   │  Process-wide    │              │
 │   │  Oxigraph Store  │              │
 │   │  (in-memory)     │              │
 │   └──────────────────┘              │
 └─────────────────────────────────────┘
 ```
 
-The store is **per-thread** to match SQLite's connection model. Each SQLite
-connection (which runs on one thread) gets its own isolated Oxigraph store.
+There is **one Oxigraph store per process**. Every SQLite connection on
+every thread sees the same triple graph. Oxigraph 0.4's in-memory store
+is internally concurrent (every mutator takes `&self`); the extension
+wraps it in `OnceLock` only for lazy initialisation.
+
+### Limitations
+
+- **No persistence.** The store is purely in-memory — process restart
+  drops every triple. The persistent RocksDB backend lands in a later
+  release; until then, populate the store from a source of truth at
+  boot or first access.
+- **No named graphs yet.** All triples live in the default graph.
+  Named-graph support is the next release (`docs/plans/PLAN_0.3.0.md`).
+- **RDF 1.1 only.** RDF-star quoted triples are rejected with a clear
+  error.
 
 ---
 

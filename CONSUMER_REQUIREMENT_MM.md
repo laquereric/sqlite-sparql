@@ -156,6 +156,121 @@ When drift is detected, the fix path is:
 Never fix drift by patching the extension from within MM, and never by
 patching the gem from within MM. Both boundaries stay bright.
 
+## Requested extensions
+
+> **Re-numbering note (2026-05-19).** This section previously labelled
+> the two requested extensions as "toward 0.2.0". The 0.2.0 slot was
+> retasked for the shared process-wide store correctness fix surfaced
+> in `docs/reviews/REVIEW_0.1.0.md` — see `docs/plans/PLAN_0.2.0.md`.
+> The consumer-requested features below ship as **0.3.0** (named
+> graphs, `docs/plans/PLAN_0.3.0.md`) and **0.4.0** (batched insert,
+> `docs/plans/PLAN_0.4.0.md`). The functional contracts below are
+> unchanged; only the version labels move.
+
+### Named graph support (toward 0.3.0)
+
+`CLAUDE.md` § "Completing the Implementation" #2 already names this as
+planned upstream work; this section pins it as a load-bearing dependency
+for MM's PLAN_0_29_1 Phase B.2 cutover. MM's legacy `Triple` AR model +
+`ProductTripler` service write triples to a named graph (`"bhphoto"`)
+in addition to the default graph; full deletion of the legacy table
+requires the engine to accept named-graph reads + writes through both
+the SQL-function surface and the SPARQL surface.
+
+Specific MM expectations:
+
+- `rdf_insert(subject, predicate, object, graph)` — fourth argument is
+  the graph IRI (or `NULL` for default graph).
+- `rdf_delete(...)` — same fourth-argument shape.
+- `sparql_query`, `sparql_ask`, `sparql_construct` — accept SPARQL 1.1
+  `FROM <graph>` / `FROM NAMED <graph>` / `GRAPH <graph> { … }`
+  expressions; engine routes queries to the right graph(s).
+- `rdf_triples` virtual table — gains a `graph` column on read; writes
+  honor an INSERT-time `graph` argument.
+- `rdf_count(graph)` — optional argument; counts within a named graph
+  (or all graphs if omitted).
+
+Backward compatibility: the existing 3-arg `rdf_insert(s, p, o)` MUST
+keep emitting into the default graph (so existing operators don't
+break). The 4-arg form is additive. Same for the rest — every existing
+zero-graph signature stays valid, and the named-graph variant rides
+alongside.
+
+### Acceptance signal (named graph)
+
+When named-graph support lands, MM:
+
+1. Bumps the `sqlite-sparql` submodule SHA in MM + the matching
+   `rails-semantica` SHA (which surfaces the graph parameter through
+   its Storable DSL — see
+   [`rails-semantica/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/rails-semantica/blob/main/CONSUMER_REQUIREMENT_MM.md#5-named-graph-parameter)).
+2. Migrates its data: re-emits `ProductTripler`'s existing output into
+   the `"bhphoto"` graph; deletes the legacy `triples` AR table.
+3. Updates this file: the named-graph surface graduates from
+   "Requested" into "SQL surfaces MM consumes."
+
+### Array-argument batched insert (`rdf_insert_many`, toward 0.4.0)
+
+Current write paths (`rdf_insert(s, p, o)` per call; SPARQL `INSERT
+DATA { ... }`; `rdf_load_ntriples(text)`; the `rdf_triples` virtual
+table) all work — but each puts the per-triple loop on the Ruby side
+of the FFI boundary, either as N separate SQL calls or as Ruby
+string-building work that the engine then re-parses. For PLAN_0_29_1
+Phase B.1's copy migration (one-shot, thousands of triples) and for
+`Semantica::Storable`'s per-save lifecycle hooks (every Product save
+re-emits multiple predicates), Rust-side batching beats per-row work.
+
+Proposed function:
+
+```sql
+SELECT rdf_insert_many(
+  '[
+    ["urn:mm:product:EPET2850", "schema:name", "\"Epson EcoTank\""],
+    ["urn:mm:product:EPET2850", "schema:category", "\"printer\""],
+    ["urn:mm:product:EPET2850", "schema:gtin", "\"01234567890123\""]
+  ]'
+);
+-- → INTEGER (count inserted)
+```
+
+Semantics:
+
+- Single argument: a JSON array of triple rows. Each row is a JSON
+  array of 3 or 4 N-Triples-encoded terms (`[s, p, o]` or `[s, p, o, graph]`
+  once named graphs ship). Strings carry their own `<>` / `""` / `^^<>`
+  wrapping per N-Triples conventions — same as the existing
+  `rdf_insert` scalar's arguments.
+- Loops in Rust; one Oxigraph-store transaction for the whole batch.
+- Returns the count actually inserted (post-dedup, since RDF is set
+  semantics — re-inserting an existing triple is a no-op).
+- Symmetric `rdf_delete_many(json_array)` would be natural too; same
+  shape, same return value.
+
+Backward compatibility: additive. `rdf_insert(s, p, o)` keeps its
+current shape; the batched variant rides alongside.
+
+Why JSON-arg over varargs or virtual-table-only: keeps the FFI
+surface narrow (one TEXT param), matches existing SQLite extension
+conventions (e.g. `sqlite-vec`'s vector functions accept JSON
+arrays), and `Semantica::Sparql` can hand a single string across the
+boundary without per-row prepared-statement bind overhead.
+
+### Acceptance signal (batched insert)
+
+When this lands, MM:
+
+1. Bumps the `sqlite-sparql` submodule SHA in MM + the matching
+   `rails-semantica` SHA (which exposes a `Semantica::Sparql.bulk_insert`
+   convenience over the batched function — see
+   [`rails-semantica/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/rails-semantica/blob/main/CONSUMER_REQUIREMENT_MM.md#6-batched-write-convenience-sparqlbulk_insert)).
+2. Rewrites the PLAN_0_29_1 Phase B.1 copy migration to call
+   `Semantica::Sparql.bulk_insert` once per ~1000-triple batch (instead
+   of N per-triple `INSERT DATA` calls).
+3. `Semantica::Storable`'s per-save lifecycle hook batches all
+   declared predicates for a record into a single batched call.
+4. Updates this file: the batched-insert surface graduates from
+   "Requested" into "SQL surfaces MM consumes."
+
 ## Contact
 
 For questions about MM's consumption pattern, see MM's
