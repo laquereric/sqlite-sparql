@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.5.0 — SPARQL UPDATE
+
+Exposes Oxigraph's `Store::update` as a new scalar:
+
+- `sparql_update(query) → INTEGER` — runs any SPARQL 1.1 UPDATE form
+  (`INSERT DATA`, `DELETE DATA`, `INSERT { … } WHERE { … }`,
+  `DELETE { … } WHERE { … }`, mixed modifies, `CLEAR`, `CREATE`,
+  `DROP`, `LOAD`).
+
+### Return value — important
+
+Oxigraph 0.4's `Store::update` doesn't expose a first-class
+affected-row count. `sparql_update` returns the **signed net change**
+in store size, computed via `len()` before and after the call:
+
+| UPDATE shape                            | Return value             |
+|-----------------------------------------|--------------------------|
+| `INSERT DATA { … }`                     | `+N` (newly inserted, post-dedup) |
+| `DELETE DATA { … }`                     | `-N` (removed)           |
+| `INSERT { … } WHERE { … }`              | `+N`                     |
+| `DELETE { … } WHERE { … }`              | `-N`                     |
+| mixed `DELETE/INSERT { … } WHERE { … }` | `inserts - deletes` (may be `0`) |
+| `CLEAR DEFAULT` / `CLEAR ALL` / `CLEAR GRAPH <g>` | `-N`           |
+
+A balanced mixed UPDATE returns `0` even though both halves ran.
+When you need to assert *state*, use `rdf_count` / `sparql_ask` /
+`sparql_query` instead of relying on the delta.
+
+### Error classification
+
+Errors are split into `ParseError` (Oxigraph's `EvaluationError::Parsing`
+variant — bad SPARQL syntax) and `EvalError` (everything else —
+graph-already-exists, unbound service, etc.). The resulting SQLite
+error message is prefixed `SPARQL parse error: …` or
+`SPARQL evaluation error: …` so downstream consumers can
+pattern-match.
+
+### Network safety
+
+SPARQL 1.1 `LOAD <iri>` would make Oxigraph fetch the IRI over HTTP
+from inside the database. The default Oxigraph build has no HTTP
+support, so `LOAD` returns an evaluation error today. If you ever
+build Oxigraph with HTTP enabled, sandbox the host process
+accordingly — this is a deliberate non-mitigation in 0.5.0.
+
+### Tests
+
+Ten new integration tests (37 + 1 ignored, up from 27 + 1):
+`test_sparql_update_insert_data`, `test_sparql_update_delete_data`,
+`test_sparql_update_dedup_on_insert_data`,
+`test_sparql_update_where_insert`,
+`test_sparql_update_modify_mixed` (asserts store state, not delta,
+for mixed ops), `test_sparql_update_named_graph`,
+`test_sparql_update_clear_default`, `test_sparql_update_clear_all`,
+`test_sparql_update_parse_error_surfaces`,
+`test_sparql_update_evaluation_error_surfaces`.
+
 ## 0.4.0 — batched insert / delete
 
 Adds `rdf_insert_many(json)` and `rdf_delete_many(json)` for writing

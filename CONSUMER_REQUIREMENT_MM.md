@@ -141,6 +141,21 @@ own specs):
 - Named graph support (MM uses the default graph only).
 - RDF/XML loading (MM loads via Storable, not bulk loaders).
 
+## Available upstream but not exercised by MM
+
+These ship in the engine but MM does not call them today. They are
+listed for completeness — if MM ever needs them, no upstream work is
+required:
+
+- `sparql_update(query) → INTEGER` (from 0.5.0) — arbitrary SPARQL
+  1.1 UPDATE. MM mutates via `Storable` lifecycle hooks (which call
+  `rdf_insert`/`rdf_delete`), so UPDATE is unused. RS exposes it
+  through `Semantica::Sparql.execute` for the gem-level facade.
+- `rdf_load_rdfxml(text)` — MM doesn't bulk-load RDF/XML.
+- `rdf_dump_ntriples()` — MM doesn't dump.
+- `rdf_term_type` / `rdf_term_value` — MM hands string-typed values
+  to the gem, which doesn't need these helpers.
+
 ## Behaviours MM does NOT depend on
 
 So upstream is free to change these without notifying MM:

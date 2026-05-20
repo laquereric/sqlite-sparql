@@ -36,6 +36,11 @@ the premier framework for writing SQLite extensions in Rust.
   clauses route the query through Oxigraph unchanged.
 - **`sparql_ask(query)`** — Execute a SPARQL ASK → `0` or `1`
 - **`sparql_construct(query)`** — Execute a SPARQL CONSTRUCT → N-Triples text
+- **`sparql_update(query)`** — Execute any SPARQL 1.1 UPDATE form
+  (`INSERT DATA`, `DELETE DATA`, `INSERT/DELETE … WHERE`, `CLEAR`,
+  `CREATE`, `DROP`). Returns the **signed net change** in store size:
+  `+N` for inserts, `-N` for deletes, `inserts - deletes` for mixed
+  modifies (so a balanced mixed UPDATE may return `0`).
 - **`rdf_triples` virtual table** — Read/write SQL view of the triple
   store. Columns: `subject`, `predicate`, `object`, plus a HIDDEN `graph`
   column (default graph = `NULL`). `SELECT *` and the 3-column `INSERT
@@ -145,6 +150,30 @@ SELECT rdf_delete_many('[
 A malformed row (wrong arity, non-string element, invalid IRI) aborts
 the whole batch with a row-indexed error message; nothing is written.
 
+### SPARQL UPDATE
+
+For arbitrary SPARQL 1.1 UPDATE — anything beyond `INSERT DATA` /
+`DELETE DATA` that the scalar surface and `rdf_insert_many` can
+already express — use `sparql_update`:
+
+```sql
+SELECT sparql_update(
+  'INSERT { ?p <http://example.org/derived_at> ?nowstr }
+   WHERE  { ?p a <http://xmlns.com/foaf/0.1/Person>
+            BIND(STR(NOW()) AS ?nowstr) }'
+);
+-- → +N  (one new triple per matching person)
+
+SELECT sparql_update('CLEAR GRAPH <urn:graph:bhphoto>');
+-- → -N  (count cleared)
+```
+
+Return value: signed net change in store size. Positive for
+insert-only, negative for delete-only, `inserts - deletes` for mixed
+operations (so a balanced mixed UPDATE can return `0` even though
+both halves ran). Observe the store with `rdf_count` / `sparql_ask`
+when you need to assert state rather than delta.
+
 ### Bulk Load (Turtle)
 
 ```sql
@@ -246,6 +275,11 @@ wraps it in `OnceLock` only for lazy initialisation.
   the boundary narrow. Use IRI-named graphs.
 - **RDF 1.1 only.** RDF-star quoted triples are rejected with a clear
   error.
+- **`LOAD <iri>` inside `sparql_update`** would make Oxigraph fetch
+  the IRI over HTTP from inside the database. The default Oxigraph
+  build has no HTTP support, so `LOAD` returns an evaluation error.
+  If you build Oxigraph with HTTP enabled, sandbox the database
+  process accordingly.
 
 ---
 
@@ -256,7 +290,7 @@ wraps it in `OnceLock` only for lazy initialisation.
       routing) — landed in 0.3.0
 - [x] Batched insert (`rdf_insert_many` / `rdf_delete_many`) — landed
       in 0.4.0
-- [ ] `sparql_update(query)` for SPARQL 1.1 Update
+- [x] `sparql_update(query)` for SPARQL 1.1 Update — landed in 0.5.0
 - [ ] Persistent store via Oxigraph's RocksDB backend
 - [ ] `rdf_open(path)` to attach a persistent store
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries

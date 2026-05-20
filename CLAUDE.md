@@ -110,10 +110,12 @@ via standard `GRAPH`/`FROM`/`FROM NAMED` clauses. See
 `docs/plans/PLAN_0.3.0.md`. Blank-node graphs are deliberately rejected
 to keep the boundary narrow.
 
-### 3. SPARQL UPDATE (SPARQL 1.1 Update)
-Oxigraph supports SPARQL Update via `store.update(query)`. Add a
-`sparql_update(query TEXT) → INTEGER` scalar function in
-`src/functions/sparql_query.rs`.
+### 3. SPARQL UPDATE — DONE in 0.5.0
+`sparql_update(query) → INTEGER` exposes `Store::update`. Returns the
+signed net change in store size (Oxigraph 0.4 doesn't surface a
+first-class affected-row count; the delta is the honest summary for
+single-direction updates and `inserts - deletes` for mixed modifies).
+See `docs/plans/PLAN_0.5.0.md`.
 
 ### 4. Persistent Store (RocksDB backend)
 For production use, replace the in-memory `Store::new()` in `store.rs` with

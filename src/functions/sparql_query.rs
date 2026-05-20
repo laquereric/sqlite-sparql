@@ -11,7 +11,7 @@
 /// SELECT sparql_query('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
 /// -- Returns: [{"s":"http://...","p":"http://...","o":"\"hello\""}]
 /// ```
-use oxigraph::sparql::{QueryResults, QuerySolution};
+use oxigraph::sparql::{EvaluationError, QueryResults, QuerySolution};
 use sqlite_loadable::{api, define_scalar_function, prelude::*, FunctionFlags};
 
 use crate::error::SparqlError;
@@ -54,6 +54,39 @@ pub fn sparql_construct_fn(
     let turtle = execute_sparql_construct(query_str).map_err(sqlite_loadable::Error::from)?;
 
     api::result_text(context, &turtle)?;
+    Ok(())
+}
+
+/// Scalar function: `sparql_update(query_string) -> INTEGER (signed net delta)`.
+///
+/// Runs any SPARQL 1.1 UPDATE form against the process-wide store. The
+/// return value is the *signed* change in `rdf_count_all()` across the
+/// call:
+///
+/// | UPDATE shape                              | Return |
+/// |-------------------------------------------|--------|
+/// | `INSERT DATA { … }`                       | `+N`   |
+/// | `DELETE DATA { … }`                       | `-N`   |
+/// | `INSERT { … } WHERE { … }`                | `+N`   |
+/// | `DELETE { … } WHERE { … }`                | `-N`   |
+/// | mixed `DELETE/INSERT { … } WHERE { … }`   | `inserts - deletes` (may be `0`) |
+/// | `CLEAR DEFAULT` / `CLEAR ALL`             | `-N`   |
+///
+/// Oxigraph's `Store::update` doesn't expose a first-class affected-row
+/// count, so we sandwich it between `len()` reads. Callers that know
+/// their UPDATE is one-direction can `.abs()` the result; mixed-shape
+/// callers should observe the store state via `rdf_count` /
+/// `sparql_query` instead of relying on the delta.
+pub fn sparql_update_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let query_str =
+        api::value_text(values.get(0).expect("1st argument: SPARQL UPDATE query"))?;
+
+    let delta = execute_sparql_update(query_str).map_err(sqlite_loadable::Error::from)?;
+
+    api::result_int64(context, delta);
     Ok(())
 }
 
@@ -102,6 +135,25 @@ fn execute_sparql_ask(query_str: &str) -> crate::error::Result<bool> {
             )),
         }
     })
+}
+
+fn execute_sparql_update(query_str: &str) -> crate::error::Result<i64> {
+    with_store(|store| {
+        let before = store.len().unwrap_or(0) as i64;
+        store.update(query_str).map_err(classify_evaluation_error)?;
+        let after = store.len().unwrap_or(0) as i64;
+        Ok(after - before)
+    })
+}
+
+/// Map Oxigraph's `EvaluationError` onto our own enum. Splitting the
+/// parse path out of the evaluation path matters for RS's refusal
+/// envelopes — `ParseError` carries the "bad SPARQL syntax" signal.
+fn classify_evaluation_error(e: EvaluationError) -> SparqlError {
+    match e {
+        EvaluationError::Parsing(_) => SparqlError::ParseError(e.to_string()),
+        _ => SparqlError::EvalError(e.to_string()),
+    }
 }
 
 fn execute_sparql_construct(query_str: &str) -> crate::error::Result<String> {
@@ -176,6 +228,13 @@ pub fn register(db: *mut sqlite3) -> sqlite_loadable::Result<()> {
         "sparql_construct",
         1,
         sparql_construct_fn,
+        FunctionFlags::UTF8,
+    )?;
+    define_scalar_function(
+        db,
+        "sparql_update",
+        1,
+        sparql_update_fn,
         FunctionFlags::UTF8,
     )?;
     Ok(())

@@ -97,6 +97,7 @@ uncoordinated — go ahead.
 | `sparql_query(query TEXT) → TEXT` | `Semantica::Sparql.select(query)` | Returns a JSON-encoded string parseable by Ruby's `JSON.parse` into an `Array<Hash>`. Keys are SPARQL variable names. Values are bound terms in **N-Triples encoding** (IRIs in `<>`, literals quoted). Empty result set returns `"[]"` or NULL — RS normalises both to `[]`. |
 | `sparql_ask(query TEXT) → INTEGER` | `Semantica::Sparql.ask(query)` | Returns `0` or `1`. RS coerces to `true`/`false`. |
 | `sparql_construct(query TEXT) → TEXT` | `Semantica::Sparql.construct(query)` | Returns N-Triples-formatted text. RS passes through unchanged. |
+| `sparql_update(query TEXT) → INTEGER` (from 0.5.0) | `Semantica::Sparql.execute(any_update)` | Runs any SPARQL 1.1 UPDATE form. Returns **signed net delta** in store size (`+N` insert / `-N` delete / `inserts - deletes` for mixed). Errors split into `SPARQL parse error: …` and `SPARQL evaluation error: …` prefixes; RS pattern-matches the prefix for its refusal envelopes. |
 
 The leading/trailing quote/bracket characters in `sparql_query`'s
 bound values **matter**. RS feeds those values back into
@@ -270,18 +271,29 @@ RS:
 Coordination signal: when the engine ships, ping RS so PLAN_0.2.0
 Phase E opens.
 
-### 5. SPARQL UPDATE — optional, post-v0.2.0
+### 5. SPARQL UPDATE — LANDED in 0.5.0
 
-RS's `Semantica::Sparql.execute` translates `INSERT DATA` /
-`DELETE DATA` / `CLEAR ALL` into scalar calls today. Arbitrary
-SPARQL UPDATE (e.g. `INSERT { ?s ?p ?o } WHERE { ... }`) is
-refused. CLAUDE.md notes Oxigraph supports this via
-`store.update(query)`. When it ships:
+The upstream side is complete as of `v0.5.0`. The contract differs
+slightly from the originally-proposed wording:
 
-- `sparql_update(query TEXT) → INTEGER` — count of affected
-  triples. RS routes any UPDATE-not-DATA form there.
-- RS's PLAN_0.3.0 (not yet written) would close the matching
-  consumer-side gap.
+- `sparql_update(query TEXT) → INTEGER` — ships. ✓
+- The return is the **signed net delta in store size**, not "count
+  of affected triples" — Oxigraph 0.4's `Store::update` doesn't
+  expose an affected-row count, and computing one for mixed
+  `DELETE/INSERT` operations would require re-evaluating the WHERE
+  pattern. The delta is honest for single-direction updates; mixed
+  ops should be observed via `rdf_count` / `sparql_ask` rather than
+  the delta.
+- Errors split into `SPARQL parse error: …` (Oxigraph's
+  `EvaluationError::Parsing` — bad SPARQL syntax) and `SPARQL
+  evaluation error: …` (everything else). RS pattern-matches the
+  prefix for refusal envelopes.
+
+RS-side adoption: RS PLAN_0.3.0 routes any UPDATE-not-DATA form
+through `sparql_update`. The existing `INSERT DATA` / `DELETE DATA`
+/ `CLEAR ALL` special cases can be retained for return-value
+ergonomics (they translate naturally to the +N / -N delta) or
+collapsed into one path that always calls `sparql_update`.
 
 ### Acceptance signal
 
@@ -297,8 +309,9 @@ PLAN_0.2.0 Phase D — RS:
 #4 (rdf_insert_many) graduates RS PLAN_0.2.0 Phase E independently
 of #1–#3; it can land first, last, or in parallel.
 
-#5 (sparql_update) follows independently — RS PLAN_0.3.0
-acceptance signal, not v0.2.0's.
+#5 (sparql_update) **upstream complete** in `v0.5.0`. RS-side work
+is on RS's PLAN_0.3.0 (not yet written) — independent acceptance
+signal from #1–#4.
 
 ## Contact
 

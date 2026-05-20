@@ -776,4 +776,187 @@ mod tests {
         );
         Ok(())
     }
+
+    // ── 0.5.0 sparql_update ───────────────────────────────────────────────────
+
+    fn run_update(conn: &Connection, q: &str) -> Result<i64> {
+        conn.query_row("SELECT sparql_update(?)", rusqlite::params![q], |r| r.get(0))
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_insert_data() -> Result<()> {
+        let conn = open_with_extension()?;
+        let delta = run_update(
+            &conn,
+            "INSERT DATA { <http://e/a> <http://e/p> \"x\" }",
+        )?;
+        assert_eq!(delta, 1);
+        let n: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(n, 1);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_delete_data() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch("SELECT rdf_insert('http://e/a','http://e/p','\"x\"');")?;
+        let delta = run_update(
+            &conn,
+            "DELETE DATA { <http://e/a> <http://e/p> \"x\" }",
+        )?;
+        assert_eq!(delta, -1, "DELETE DATA returns a negative delta");
+        let n: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(n, 0);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_dedup_on_insert_data() -> Result<()> {
+        let conn = open_with_extension()?;
+        let q = "INSERT DATA { <http://e/a> <http://e/p> \"x\" . <http://e/a> <http://e/p> \"x\" }";
+        let delta = run_update(&conn, q)?;
+        assert_eq!(
+            delta, 1,
+            "RDF set semantics: duplicate quad in one INSERT DATA only counts once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_where_insert() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Seed two source triples; INSERT derives a new predicate for each.
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/a','http://e/src','\"v1\"');
+             SELECT rdf_insert('http://e/b','http://e/src','\"v2\"');",
+        )?;
+        let delta = run_update(
+            &conn,
+            "INSERT { ?s <http://e/derived> ?o } WHERE { ?s <http://e/src> ?o }",
+        )?;
+        assert_eq!(delta, 2, "two source rows → two derived rows");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_modify_mixed() -> Result<()> {
+        // For mixed DELETE/INSERT, observe the store state, not the delta —
+        // the delta lies for balanced mixed ops by design.
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/a','http://e/old','\"v\"');",
+        )?;
+        // Swap predicate: delete old, insert new.
+        let _ = run_update(
+            &conn,
+            "DELETE { ?s <http://e/old> ?o } INSERT { ?s <http://e/new> ?o } \
+             WHERE { ?s <http://e/old> ?o }",
+        )?;
+        let new_count: i64 = conn.query_row(
+            "SELECT sparql_ask('ASK { <http://e/a> <http://e/new> \"v\" }')",
+            [],
+            |r| r.get(0),
+        )?;
+        let old_count: i64 = conn.query_row(
+            "SELECT sparql_ask('ASK { <http://e/a> <http://e/old> ?o }')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(new_count, 1, "new predicate was inserted");
+        assert_eq!(old_count, 0, "old predicate was deleted");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_named_graph() -> Result<()> {
+        let conn = open_with_extension()?;
+        let delta = run_update(
+            &conn,
+            "INSERT DATA { GRAPH <urn:g:bhphoto> { <http://e/a> <http://e/p> \"x\" } }",
+        )?;
+        assert_eq!(delta, 1);
+        let default_n: i64 =
+            conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        let bhphoto_n: i64 = conn.query_row(
+            "SELECT rdf_count(?)",
+            rusqlite::params!["urn:g:bhphoto"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(default_n, 0, "named-graph INSERT must not leak to default");
+        assert_eq!(bhphoto_n, 1);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_clear_default() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/d','http://e/p','\"v\"');
+             SELECT rdf_insert('http://e/n','http://e/p','\"v\"','urn:g:keep');",
+        )?;
+        let _delta = run_update(&conn, "CLEAR DEFAULT")?;
+        let d: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_count(?)",
+            rusqlite::params!["urn:g:keep"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(d, 0, "default graph cleared");
+        assert_eq!(n, 1, "named graph untouched");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_clear_all() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/d','http://e/p','\"v\"');
+             SELECT rdf_insert('http://e/n','http://e/p','\"v\"','urn:g:zap');",
+        )?;
+        let _ = run_update(&conn, "CLEAR ALL")?;
+        let all: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(all, 0, "CLEAR ALL empties every graph");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_parse_error_surfaces() -> Result<()> {
+        let conn = open_with_extension()?;
+        let err = run_update(&conn, "this is not sparql")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("parse"),
+            "parse failures must surface a 'parse' error string, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_sparql_update_evaluation_error_surfaces() -> Result<()> {
+        // CREATE GRAPH on an already-existing graph is a syntactically valid
+        // UPDATE that fails at evaluation time. Surface should be a SQLite
+        // error string, not a Rust panic — which the test harness would
+        // turn into a crashing test run, not a failing test.
+        let conn = open_with_extension()?;
+        let _ = run_update(&conn, "CREATE GRAPH <urn:g:dup>")?;
+        let err = run_update(&conn, "CREATE GRAPH <urn:g:dup>")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.is_empty(),
+            "evaluation errors must surface as a non-empty SQLite error"
+        );
+        Ok(())
+    }
 }
