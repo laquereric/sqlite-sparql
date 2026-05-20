@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.0 — batched insert / delete
+
+Adds `rdf_insert_many(json)` and `rdf_delete_many(json)` for writing
+many triples in a single FFI crossing, collapsing the SQL-parse +
+function-dispatch overhead of N separate `rdf_insert` calls down to
+one.
+
+### New SQL surface
+
+- `rdf_insert_many(json) → INTEGER` — single JSON-array argument.
+  Each row is `[s, p, o]` (default graph) or `[s, p, o, graph]`
+  (named graph; `null` means default). Uses Oxigraph's `bulk_loader`
+  internally. Returns the count of *newly* inserted quads; duplicates
+  collapse under RDF set semantics and don't count.
+- `rdf_delete_many(json) → INTEGER` — mirror. Per-row removal; no-ops
+  (rows not present in the store) don't count toward the return value.
+
+### Behaviour
+
+- Empty array `'[]'` returns `0`, no error.
+- Malformed input — non-array JSON, row of wrong arity, non-string
+  element, invalid IRI, blank-node graph — aborts the *whole* batch
+  before any write touches the store. Error messages include the
+  failing row index (e.g. `row 7: subject: …`).
+- Term encoding matches the single-row `rdf_insert(s, p, o)` parser
+  exactly. Pinned by `test_insert_many_parser_parity_with_single`.
+
+### Internal
+
+- `store::{build_quad, parse_named_or_blank, parse_term,
+  parse_graph_name}` are now `pub(crate)` so the bulk module reuses
+  the single-row parser. This keeps the two write paths bit-identical
+  in their handling of the term grammar (the risk the plan called
+  out).
+
+### Tests
+
+Seven new tests (27 + 1 ignored perf-smoke, up from 20):
+`test_insert_many_3_arg_rows`,
+`test_insert_many_mixed_arities`,
+`test_insert_many_dedup_return_value`,
+`test_insert_many_malformed_aborts_batch`,
+`test_insert_many_empty_array`,
+`test_insert_many_parser_parity_with_single`,
+`test_delete_many_partial`,
+`test_insert_many_perf_smoke` (release-only, `#[ignore]` — run with
+`cargo test --release -- --ignored insert_many_perf_smoke`; 1000-row
+batch under 100 ms).
+
 ## 0.3.0 — named graphs
 
 Adds named-graph support across the full SQL surface. All existing

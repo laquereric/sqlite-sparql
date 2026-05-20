@@ -592,4 +592,188 @@ mod tests {
         assert!(g.is_none(), "missing graph means default graph; got: {g:?}");
         Ok(())
     }
+
+    // ── 0.4.0 batched insert / delete ─────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn test_insert_many_3_arg_rows() -> Result<()> {
+        let conn = open_with_extension()?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_insert_many(?)",
+            rusqlite::params![
+                r#"[
+                  ["http://e/s1","http://e/p","\"a\""],
+                  ["http://e/s2","http://e/p","\"b\""],
+                  ["http://e/s3","http://e/p","\"c\""]
+                ]"#
+            ],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 3);
+        let default_count: i64 =
+            conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(default_count, 3, "all rows land in default graph");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_many_mixed_arities() -> Result<()> {
+        let conn = open_with_extension()?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_insert_many(?)",
+            rusqlite::params![
+                r#"[
+                  ["http://e/d1","http://e/p","\"a\""],
+                  ["http://e/g1","http://e/p","\"b\"","urn:g:bhphoto"],
+                  ["http://e/d2","http://e/p","\"c\"",null]
+                ]"#
+            ],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 3);
+        let default_n: i64 =
+            conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        let bhphoto_n: i64 = conn.query_row(
+            "SELECT rdf_count(?)",
+            rusqlite::params!["urn:g:bhphoto"],
+            |r| r.get(0),
+        )?;
+        assert_eq!(default_n, 2, "two rows targeted the default graph");
+        assert_eq!(bhphoto_n, 1, "one row targeted bhphoto");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_many_dedup_return_value() -> Result<()> {
+        let conn = open_with_extension()?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_insert_many(?)",
+            rusqlite::params![
+                r#"[
+                  ["http://e/dup","http://e/p","\"x\""],
+                  ["http://e/dup","http://e/p","\"x\""]
+                ]"#
+            ],
+            |r| r.get(0),
+        )?;
+        // RDF set semantics — the duplicate is a no-op.
+        assert_eq!(n, 1, "duplicate row must not count twice");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_many_malformed_aborts_batch() -> Result<()> {
+        let conn = open_with_extension()?;
+        let result = conn.query_row::<i64, _, _>(
+            "SELECT rdf_insert_many(?)",
+            rusqlite::params![r#"[
+                  ["http://e/ok","http://e/p","\"v\""],
+                  ["bad-arity"]
+                ]"#],
+            |r| r.get(0),
+        );
+        assert!(result.is_err(), "malformed batch should error");
+        let count: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(count, 0, "all-or-nothing: nothing inserted on parse failure");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_many_empty_array() -> Result<()> {
+        let conn = open_with_extension()?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_insert_many('[]')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 0);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_insert_many_parser_parity_with_single() -> Result<()> {
+        // PLAN_0.4.0.md risk #2 — the batched function must use the same
+        // term parser as the single rdf_insert. Insert the same triple
+        // both ways; rdf_count_all() must end at 1, not 2.
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/s','http://e/p','\"v\"');",
+        )?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_insert_many(?)",
+            rusqlite::params![r#"[["http://e/s","http://e/p","\"v\""]]"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 0, "same triple via _many is a no-op");
+        let total: i64 =
+            conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(total, 1, "the two write paths produce the same quad");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_delete_many_partial() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/a','http://e/p','http://e/o');
+             SELECT rdf_insert('http://e/b','http://e/p','http://e/o');",
+        )?;
+        let n: i64 = conn.query_row(
+            "SELECT rdf_delete_many(?)",
+            rusqlite::params![
+                r#"[
+                  ["http://e/a","http://e/p","http://e/o"],
+                  ["http://e/missing","http://e/p","http://e/o"]
+                ]"#
+            ],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 1, "absent rows are no-ops and don't count");
+        let remaining: i64 =
+            conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(remaining, 1, "only e/a was removed");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    #[ignore]
+    fn test_insert_many_perf_smoke() -> Result<()> {
+        // Run with: cargo test --release -- --ignored insert_many_perf_smoke
+        // Loose so a busy CI runner doesn't flap; tight enough to catch a
+        // regression in the bulk-loader path.
+        let conn = open_with_extension()?;
+
+        let mut rows: Vec<String> = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            rows.push(format!(
+                r#"["http://e/s{}","http://e/p","\"v{}\""]"#,
+                i, i
+            ));
+        }
+        let json = format!("[{}]", rows.join(","));
+
+        let start = std::time::Instant::now();
+        let n: i64 = conn.query_row(
+            "SELECT rdf_insert_many(?)",
+            rusqlite::params![json],
+            |r| r.get(0),
+        )?;
+        let elapsed = start.elapsed();
+
+        assert_eq!(n, 1000);
+        assert!(
+            elapsed.as_millis() < 100,
+            "1000-row bulk insert should be under 100 ms, was {:?}",
+            elapsed
+        );
+        Ok(())
+    }
 }

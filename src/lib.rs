@@ -72,6 +72,9 @@ pub fn sqlite3_sqlitesparql_init(db: *mut sqlite3) -> sqlite_loadable::Result<()
     // Register RDF triple management scalar functions
     functions::rdf_triple::register(db)?;
 
+    // Register batched insert / delete (rdf_insert_many, rdf_delete_many)
+    functions::rdf_bulk::register(db)?;
+
     // Register SPARQL query scalar functions
     functions::sparql_query::register(db)?;
 

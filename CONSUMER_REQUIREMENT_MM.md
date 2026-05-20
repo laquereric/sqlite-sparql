@@ -56,6 +56,11 @@ MM breaks downstream.
 - `rdf_count(graph TEXT) → INTEGER` (from 0.3.0) — count within a named
   graph; `NULL` is the default graph.
 - `rdf_count_all() → INTEGER` (from 0.3.0) — count across every graph.
+- `rdf_insert_many(json TEXT) → INTEGER` (from 0.4.0) — JSON array of
+  `[s,p,o]` or `[s,p,o,graph]` rows; one FFI crossing, one bulk-load,
+  one return value (newly-inserted count, dedup-aware).
+- `rdf_delete_many(json TEXT) → INTEGER` (from 0.4.0) — symmetric;
+  rows not present in the store are silent no-ops and don't count.
 
 ### SPARQL querying
 
@@ -169,16 +174,18 @@ When drift is detected, the fix path is:
 Never fix drift by patching the extension from within MM, and never by
 patching the gem from within MM. Both boundaries stay bright.
 
-## Requested extensions
+## Previously requested extensions — now landed
 
-> **Re-numbering note (2026-05-19).** This section previously labelled
-> the two requested extensions as "toward 0.2.0". The 0.2.0 slot was
-> retasked for the shared process-wide store correctness fix surfaced
-> in `docs/reviews/REVIEW_0.1.0.md` — see `docs/plans/PLAN_0.2.0.md`.
-> The consumer-requested features below ship as **0.3.0** (named
-> graphs, `docs/plans/PLAN_0.3.0.md`) and **0.4.0** (batched insert,
-> `docs/plans/PLAN_0.4.0.md`). The functional contracts below are
-> unchanged; only the version labels move.
+> **History.** This section previously listed two requested
+> extensions as "toward 0.2.0". The 0.2.0 slot was retasked for the
+> shared process-wide store correctness fix surfaced in
+> `docs/reviews/REVIEW_0.1.0.md` (see `docs/plans/PLAN_0.2.0.md`),
+> so the consumer-requested features shifted: named graphs shipped
+> as **0.3.0** (`docs/plans/PLAN_0.3.0.md`) and batched insert as
+> **0.4.0** (`docs/plans/PLAN_0.4.0.md`). Both are live and listed
+> in the "SQL surfaces MM consumes" section above. The historical
+> contracts and MM-side acceptance signals are kept below as the
+> paper trail for the milestone-spanning work.
 
 ### Named graph support — LANDED in 0.3.0
 
@@ -214,18 +221,19 @@ The MM-side work remains:
 3. The "Triple management" + "Virtual table" sections above already
    list the named-graph surface as live.
 
-### Array-argument batched insert (`rdf_insert_many`, toward 0.4.0)
+### Array-argument batched insert — LANDED in 0.4.0
 
-Current write paths (`rdf_insert(s, p, o)` per call; SPARQL `INSERT
-DATA { ... }`; `rdf_load_ntriples(text)`; the `rdf_triples` virtual
-table) all work — but each puts the per-triple loop on the Ruby side
-of the FFI boundary, either as N separate SQL calls or as Ruby
-string-building work that the engine then re-parses. For PLAN_0_29_1
-Phase B.1's copy migration (one-shot, thousands of triples) and for
-`Semantica::Storable`'s per-save lifecycle hooks (every Product save
-re-emits multiple predicates), Rust-side batching beats per-row work.
+The upstream side is complete as of `v0.4.0`. The contract MM
+requested is satisfied:
 
-Proposed function:
+- `rdf_insert_many(json) → INTEGER` — accepts a JSON array of rows;
+  each row is `[s, p, o]` or `[s, p, o, graph]`. Loops in Rust via
+  Oxigraph's bulk loader; returns the post-dedup count of newly
+  inserted quads. ✓
+- Symmetric `rdf_delete_many(json)`. ✓
+- Same N-Triples term parser as the single-row `rdf_insert`, pinned
+  by `test_insert_many_parser_parity_with_single`. ✓
+- Additive: `rdf_insert(s, p, o)` keeps its current shape. ✓
 
 ```sql
 SELECT rdf_insert_many(
@@ -235,46 +243,25 @@ SELECT rdf_insert_many(
     ["urn:mm:product:EPET2850", "schema:gtin", "\"01234567890123\""]
   ]'
 );
--- → INTEGER (count inserted)
+-- → 3
 ```
 
-Semantics:
+Live surface is documented in the "Triple management" section above.
 
-- Single argument: a JSON array of triple rows. Each row is a JSON
-  array of 3 or 4 N-Triples-encoded terms (`[s, p, o]` or `[s, p, o, graph]`
-  once named graphs ship). Strings carry their own `<>` / `""` / `^^<>`
-  wrapping per N-Triples conventions — same as the existing
-  `rdf_insert` scalar's arguments.
-- Loops in Rust; one Oxigraph-store transaction for the whole batch.
-- Returns the count actually inserted (post-dedup, since RDF is set
-  semantics — re-inserting an existing triple is a no-op).
-- Symmetric `rdf_delete_many(json_array)` would be natural too; same
-  shape, same return value.
+### Acceptance signal (batched insert) — UPSTREAM READY
 
-Backward compatibility: additive. `rdf_insert(s, p, o)` keeps its
-current shape; the batched variant rides alongside.
+MM-side work remaining:
 
-Why JSON-arg over varargs or virtual-table-only: keeps the FFI
-surface narrow (one TEXT param), matches existing SQLite extension
-conventions (e.g. `sqlite-vec`'s vector functions accept JSON
-arrays), and `Semantica::Sparql` can hand a single string across the
-boundary without per-row prepared-statement bind overhead.
-
-### Acceptance signal (batched insert)
-
-When this lands, MM:
-
-1. Bumps the `sqlite-sparql` submodule SHA in MM + the matching
-   `rails-semantica` SHA (which exposes a `Semantica::Sparql.bulk_insert`
-   convenience over the batched function — see
+1. Bump the `sqlite-sparql` submodule SHA in MM to `v0.4.0` + the
+   matching `rails-semantica` SHA (which exposes a
+   `Semantica::Sparql.bulk_insert` convenience over the batched
+   function — see
    [`rails-semantica/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/rails-semantica/blob/main/CONSUMER_REQUIREMENT_MM.md#6-batched-write-convenience-sparqlbulk_insert)).
-2. Rewrites the PLAN_0_29_1 Phase B.1 copy migration to call
-   `Semantica::Sparql.bulk_insert` once per ~1000-triple batch (instead
-   of N per-triple `INSERT DATA` calls).
+2. Rewrite the PLAN_0_29_1 Phase B.1 copy migration to call
+   `Semantica::Sparql.bulk_insert` once per ~1000-triple batch
+   (instead of N per-triple `INSERT DATA` calls).
 3. `Semantica::Storable`'s per-save lifecycle hook batches all
    declared predicates for a record into a single batched call.
-4. Updates this file: the batched-insert surface graduates from
-   "Requested" into "SQL surfaces MM consumes."
 
 ## Contact
 

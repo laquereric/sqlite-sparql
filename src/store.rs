@@ -121,7 +121,7 @@ pub fn triple_count_all() -> usize {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-fn build_quad(
+pub(crate) fn build_quad(
     s: &str,
     p: &str,
     o: &str,
@@ -135,7 +135,7 @@ fn build_quad(
     Ok(Quad::new(subject, predicate, object, graph_name))
 }
 
-fn parse_graph_name(graph: Option<&str>) -> crate::error::Result<GraphName> {
+pub(crate) fn parse_graph_name(graph: Option<&str>) -> crate::error::Result<GraphName> {
     match graph {
         None => Ok(GraphName::DefaultGraph),
         Some(iri) if iri.is_empty() => Err(crate::error::SparqlError::InvalidArgument(
@@ -156,7 +156,7 @@ fn parse_graph_name(graph: Option<&str>) -> crate::error::Result<GraphName> {
 /// Parse a string as a NamedNode (IRI) or BlankNode.
 ///
 /// Blank nodes must be prefixed with `_:` (e.g. `_:b0`).
-fn parse_named_or_blank(s: &str) -> crate::error::Result<Subject> {
+pub(crate) fn parse_named_or_blank(s: &str) -> crate::error::Result<Subject> {
     if let Some(id) = s.strip_prefix("_:") {
         Ok(Subject::BlankNode(BlankNode::new(id).map_err(|e| {
             crate::error::SparqlError::InvalidArgument(format!("blank node id: {e}"))
@@ -174,7 +174,7 @@ fn parse_named_or_blank(s: &str) -> crate::error::Result<Subject> {
 /// - `_:xxx`  → BlankNode
 /// - `"text"` or `"text"^^<iri>` or `"text"@lang` → Literal
 /// - anything else → NamedNode (IRI)
-fn parse_term(s: &str) -> crate::error::Result<Term> {
+pub(crate) fn parse_term(s: &str) -> crate::error::Result<Term> {
     if let Some(id) = s.strip_prefix("_:") {
         return Ok(Term::BlankNode(BlankNode::new(id).map_err(|e| {
             crate::error::SparqlError::InvalidArgument(format!("blank node id: {e}"))

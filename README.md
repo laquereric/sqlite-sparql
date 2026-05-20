@@ -17,6 +17,10 @@ the premier framework for writing SQLite extensions in Rust.
   triple into a named graph; `graph = NULL` is the default graph.
 - **`rdf_delete(s, p, o)`** / **`rdf_delete(s, p, o, graph)`** — Delete
   triples; same `graph` semantics as `rdf_insert`.
+- **`rdf_insert_many(json)`** / **`rdf_delete_many(json)`** — Batched
+  write of a JSON array of triples. Each row is `[s, p, o]` or
+  `[s, p, o, graph]`. Returns the count actually inserted / deleted
+  (RDF set semantics — duplicates and no-ops don't count).
 - **`rdf_clear()`** — Empty the in-memory store
 - **`rdf_count()`** / **`rdf_count(graph)`** — Count triples in the
   default graph (zero-arg) or in a named graph (`NULL` = default).
@@ -116,6 +120,30 @@ VALUES ('http://example.org/x', 'http://example.org/p', '"v"', 'urn:graph:bhphot
 
 SELECT subject FROM triples WHERE graph = 'urn:graph:bhphoto';
 ```
+
+### Batched writes
+
+For thousands of triples in one shot, `rdf_insert_many` takes a single
+JSON-array argument and loops on the Rust side via Oxigraph's bulk
+loader — materially faster than N separate `rdf_insert` calls because
+the FFI crossing and SQL parse happen once instead of N times.
+
+```sql
+SELECT rdf_insert_many('[
+  ["http://example.org/alice", "http://xmlns.com/foaf/0.1/name", "\"Alice\""],
+  ["http://example.org/bob",   "http://xmlns.com/foaf/0.1/name", "\"Bob\"",   "urn:graph:bhphoto"],
+  ["http://example.org/carol", "http://xmlns.com/foaf/0.1/name", "\"Carol\"", null]
+]');
+-- → 3 (count of newly-inserted triples; duplicates and no-ops don't count)
+
+SELECT rdf_delete_many('[
+  ["http://example.org/alice", "http://xmlns.com/foaf/0.1/name", "\"Alice\""]
+]');
+-- → 1
+```
+
+A malformed row (wrong arity, non-string element, invalid IRI) aborts
+the whole batch with a row-indexed error message; nothing is written.
 
 ### Bulk Load (Turtle)
 
@@ -226,8 +254,8 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] Named graph support (4-arg `rdf_insert`/`rdf_delete`, hidden
       `graph` column on `rdf_triples`, SPARQL `GRAPH` / `FROM`
       routing) — landed in 0.3.0
-- [ ] Batched insert (`rdf_insert_many` / `rdf_delete_many`,
-      `docs/plans/PLAN_0.4.0.md`)
+- [x] Batched insert (`rdf_insert_many` / `rdf_delete_many`) — landed
+      in 0.4.0
 - [ ] `sparql_update(query)` for SPARQL 1.1 Update
 - [ ] Persistent store via Oxigraph's RocksDB backend
 - [ ] `rdf_open(path)` to attach a persistent store
