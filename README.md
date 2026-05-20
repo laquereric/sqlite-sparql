@@ -25,9 +25,14 @@ the premier framework for writing SQLite extensions in Rust.
 - **`rdf_count()`** / **`rdf_count(graph)`** — Count triples in the
   default graph (zero-arg) or in a named graph (`NULL` = default).
 - **`rdf_count_all()`** — Count triples across every graph
-- **`rdf_load_turtle(text)`** — Bulk-load from Turtle format
-- **`rdf_load_ntriples(text)`** — Bulk-load from N-Triples format
-- **`rdf_load_rdfxml(text)`** — Bulk-load from RDF/XML format
+- **`rdf_load_turtle(text)`** / **`rdf_load_turtle_to_graph(text, graph)`** —
+  Bulk-load from Turtle format. The 2-arg form routes every parsed triple
+  into the named graph `graph` (`NULL` → default graph, identical to the
+  1-arg form).
+- **`rdf_load_ntriples(text)`** / **`rdf_load_ntriples_to_graph(text, graph)`** —
+  Bulk-load from N-Triples format, same graph routing convention.
+- **`rdf_load_rdfxml(text)`** / **`rdf_load_rdfxml_to_graph(text, graph)`** —
+  Bulk-load from RDF/XML format, same graph routing convention.
 - **`rdf_dump_ntriples()`** — Serialise all triples as N-Triples
 - **`rdf_term_type(term)`** — Returns `"iri"`, `"blank"`, or `"literal"`
 - **`rdf_term_value(term)`** — Extracts the plain string value from a term

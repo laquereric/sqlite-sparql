@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0 — Graph-scoped bulk loading
+
+Closes the last named-graph gap on the SQL surface. Until 0.6.0 the
+three bulk loaders forced every parsed quad into the default graph,
+which meant a consumer issuing `INSERT DATA { GRAPH <iri> { … } }`
+through `rdf_load_ntriples` saw the `GRAPH` wrapper silently
+discarded. Three new scalars route the parsed quads into a named graph
+in one FFI call:
+
+- `rdf_load_ntriples_to_graph(body TEXT, graph TEXT) → INTEGER`
+- `rdf_load_turtle_to_graph(body TEXT, graph TEXT) → INTEGER`
+- `rdf_load_rdfxml_to_graph(body TEXT, graph TEXT) → INTEGER`
+
+`graph = NULL` means the default graph (identical to the 1-arg
+loaders); `graph = '<iri>'`-style strings are rejected — pass the bare
+IRI as the second argument, matching the 4-arg `rdf_insert(s, p, o,
+graph)` convention from 0.3.0. Blank-node graph IRIs (`_:label`) are
+rejected with the same `blank-node graphs are not supported` error
+the 0.3.0 path raises, so consumer-side prefix-matching keeps working
+unchanged.
+
+The 1-arg loaders are byte-for-byte unchanged. The 2-arg form with
+`NULL` produces the same store state as the 1-arg form — pinned by
+`test_rdf_load_ntriples_to_graph_parser_parity`.
+
+Driver: `CONSUMER_REQUIREMENT_RS.md` § "Requested extensions" item #1.
+With this in place, items #1–#4 of that file graduate from "Requested"
+to "SQL surfaces RS consumes."
+
 ## 0.5.0 — SPARQL UPDATE
 
 Exposes Oxigraph's `Store::update` as a new scalar:

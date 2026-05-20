@@ -81,14 +81,38 @@ with it.
 
 | Function | RS call site | RS expectation |
 |---|---|---|
-| `rdf_load_ntriples(text TEXT) → INTEGER` | `Semantica::Sparql.execute("INSERT DATA { ... }")` | Accepts N-Triples-formatted body. Returns count loaded. IRIs **with** angle brackets; literals as `"..."`. |
+| `rdf_load_ntriples(text TEXT) → INTEGER` | `Semantica::Sparql.execute("INSERT DATA { ... }")` (default-graph payload) | Accepts N-Triples-formatted body. Returns count loaded. IRIs **with** angle brackets; literals as `"..."`. |
+| `rdf_load_ntriples_to_graph(text TEXT, graph TEXT) → INTEGER` (from 0.6.0) | `Semantica::Sparql.execute("INSERT DATA { GRAPH <iri> { ... } }")` | Same body grammar as the 1-arg form. `graph` is a bare IRI (no angle brackets), `NULL` for the default graph. Blank-node graph IRIs (`_:label`) are rejected with `blank-node graphs are not supported` — RS prefix-matches this for its refusal envelope. |
 | `rdf_delete(subject TEXT, predicate TEXT, object TEXT) → 1` | `Semantica::Sparql.execute("DELETE DATA { ... }")` and `Semantica::Storable#retract_predicate!` | Called once per triple. **Subject + predicate** must be **bare IRIs without angle brackets** (see asymmetry note below); object retains its N-Triples form. Returns without raising when the triple is absent. |
+| `rdf_delete(subject TEXT, predicate TEXT, object TEXT, graph TEXT) → 1` (from 0.3.0) | `Semantica::Sparql.execute("DELETE DATA { GRAPH <iri> { ... } }")` and the graph-scoped retract paths in Storable | Same subject/predicate asymmetry as the 3-arg form. `graph = NULL` is equivalent to the 3-arg form (default graph). Blank-node graphs rejected as for the loader. |
+| `rdf_insert_many(json TEXT) → INTEGER` (from 0.4.0) | `Semantica::Sparql.bulk_insert(rows)` | JSON array of rows; each row is `[s, p, o]` or `[s, p, o, graph]`. Same N-Triples term grammar as the single-row `rdf_insert` (pinned by `test_insert_many_parser_parity_with_single`). Returns the post-dedup count of newly inserted quads. |
+| `rdf_delete_many(json TEXT) → INTEGER` (from 0.4.0) | `Semantica::Sparql.bulk_delete(rows)` | Symmetric; rows not present in the store are silent no-ops and don't count. |
 | `rdf_clear() → 1` | `Semantica::Sparql.execute("CLEAR ALL"|"CLEAR DEFAULT")` and spec-suite per-example reset | Resets the store. Safe to call repeatedly. |
 
 RS does **not** consume `rdf_insert`, `rdf_load_turtle`,
-`rdf_load_rdfxml`, `rdf_dump_ntriples`, `rdf_term_type`, or
-`rdf_term_value`. Renames / removals of any of those are
-uncoordinated — go ahead.
+`rdf_load_turtle_to_graph`, `rdf_load_rdfxml`,
+`rdf_load_rdfxml_to_graph`, `rdf_dump_ntriples`, `rdf_term_type`, or
+`rdf_term_value`. Renames / removals of any of those are uncoordinated
+— go ahead.
+
+#### Named-graph SPARQL query path
+
+`sparql_query` / `sparql_ask` / `sparql_construct` accept arbitrary
+SPARQL — including `GRAPH <iri> { … }` patterns and `FROM <iri>` /
+`FROM NAMED <iri>` dataset clauses — and route them straight through
+to Oxigraph. RS exercises this via the `graph:` kwarg on its facade,
+which rewrites the query to inject a `GRAPH` wrapper before calling
+the engine. Confirming fixtures live in the engine's
+`tests/integration_test.rs`:
+
+- `test_sparql_query_graph_clause` — pins that a `GRAPH <urn:g:bhphoto> { … }`
+  query returns only that graph's triples.
+- `test_sparql_query_default_dataset_isolates` — pins that an
+  unqualified `?s ?p ?o` query returns only the default graph, not
+  the union of every graph.
+
+If either of those starts failing upstream, the gem-level facade's
+graph-routing assumptions break too — coordinate.
 
 ### SPARQL querying
 
@@ -196,122 +220,88 @@ When drift is detected, the fix path is:
 Never fix drift by patching the extension from within RS or MM.
 The boundary stays bright in both directions.
 
-## Requested extensions (toward engine v0.x)
+## Previously requested extensions — now landed
 
-RS's `docs/plans/PLAN_0.2.0.md` Phase D depends on the items
-below. Until they land upstream, RS ships `:engine_unsupported`
-refusal envelopes for the `graph:` kwarg paths.
+> **History.** This section previously listed five engine asks. The
+> upstream side of every one is now live; the live contracts are in
+> the "SQL surfaces RS consumes" section above. The historical
+> notes are kept below as the paper trail for the milestone-spanning
+> work — and for the RS-side acceptance signals that may still be
+> open on the gem.
 
-### 1. Named graph support — INSERT path
+### 1. Named graph support — INSERT path — LANDED in 0.6.0
 
-Today `rdf_load_ntriples` parses an N-Triples body into the
-**default graph** unconditionally (see `functions/rdf_triple.rs`
-forcing `GraphName::DefaultGraph` per quad). RS's PLAN_0.2.0
-Phase D needs the gem to be able to write to a named graph:
+`docs/plans/PLAN_0.6.0.md`. `rdf_load_ntriples_to_graph(body, graph)`
+ships (plus Turtle / RDF/XML siblings for surface symmetry). RS routes
+`INSERT DATA { GRAPH <iri> { … } }` through the 2-arg form; the 1-arg
+loader is unchanged for default-graph payloads. The alternative shape
+(teaching the 1-arg loader to honour an enclosing `GRAPH { … }`
+wrapper) was deliberately rejected — N-Triples grammar has no graph
+syntax, so a separate scalar names the operation honestly. See the
+plan for the full reasoning.
 
-```sparql
-INSERT DATA { GRAPH <urn:mm:graph:bhphoto> { <s> <p> <o> . } }
-```
+### 2. Named graph support — DELETE path — LANDED in 0.3.0
 
-Either:
+`rdf_delete(s, p, o, graph)` ships as a 4-arg overload — see the
+"Triple management" table above for the live contract. SQLite's
+scalar-arity model accommodates overloads despite the wording in the
+original ask. Same subject/predicate bare-IRI asymmetry as the 3-arg
+form.
 
-- Extend `rdf_load_ntriples` to detect an enclosing `GRAPH <iri>
-  { ... }` and write quads (not triples) accordingly, **or**
-- Expose a new scalar:
-  `rdf_load_ntriples_to_graph(body TEXT, graph_iri TEXT) → INTEGER`
-  — RS routes graph-tagged INSERT DATA there.
+### 3. Named graph support — SPARQL query path — LANDED in 0.3.0
 
-Either landing is acceptable; clarity is the only constraint.
+No engine change was needed; Oxigraph 0.4 honours `GRAPH { … }` and
+`FROM <iri>` / `FROM NAMED <iri>` patterns directly. The confirming
+spec lives in `tests/integration_test.rs` as
+`test_sparql_query_graph_clause` (graph-scoped query returns only
+that graph's triples) and `test_sparql_query_default_dataset_isolates`
+(unqualified `?s ?p ?o` returns only the default graph, not the union
+of every graph). Both pinned at upstream and named in the live
+"Named-graph SPARQL query path" subsection above.
 
-### 2. Named graph support — DELETE path
+### 4. Batched insert — `rdf_insert_many` — LANDED in 0.4.0
 
-`rdf_delete(s, p, o)` is graph-blind today (acts on the default
-graph). RS needs:
-
-- `rdf_delete_in_graph(s, p, o, graph_iri TEXT) → 1`, **or**
-- A 4-arg `rdf_delete(s, p, o, graph_iri TEXT) → 1` overload —
-  but SQLite scalar arity is fixed, so a separate function is
-  probably cleaner.
-
-### 3. Named graph support — SPARQL query path
-
-`sparql_query` / `sparql_ask` / `sparql_construct` already accept
-arbitrary SPARQL — including `GRAPH <iri> { ... }` patterns. RS's
-PLAN_0.2.0 Phase D wires a `graph:` kwarg on the facade methods
-that rewrites the query to inject the `GRAPH` wrapper. **No engine
-change should be needed here** — RS just needs the existing
-`store.update(query)` / `store.query(query)` paths to honour
-`GRAPH` patterns correctly per SPARQL 1.1.
-
-Confirming spec on the engine side: a query like
-`SELECT ?s WHERE { GRAPH <urn:mm:graph:bhphoto> { ?s ?p ?o } }`
-must return only triples written to that named graph; the same
-pattern with a different graph IRI must return nothing.
-
-### 4. Batched insert — `rdf_insert_many`
-
-MM is asking the engine for an array-argument batched-insert path
-via its own `./CONSUMER_REQUIREMENT_MM.md`. RS doesn't need to
-duplicate the engine-side ask — but the gem-side facade
-(`Semantica::Sparql.bulk_insert` / `bulk_delete`) that consumes it
-is scoped in RS's
-[`PLAN_0.2.0.md`](https://github.com/laquereric/rails-semantica/blob/main/docs/plans/PLAN_0.2.0.md)
-Phase E.
-
-When the engine ships `rdf_insert_many` (or whatever shape lands),
-RS:
-
-1. Implements `Semantica::Sparql.bulk_insert(rows)` /
-   `bulk_delete(rows)` against the engine surface.
-2. `Storable` lifecycle hooks adopt the bulk path automatically
-   (runtime-probe; falls back to the per-call path if the engine
-   surface isn't present).
-3. Removes the `:engine_unsupported` stub from the bulk methods.
-
-Coordination signal: when the engine ships, ping RS so PLAN_0.2.0
-Phase E opens.
+`rdf_insert_many(json) → INTEGER` and the symmetric
+`rdf_delete_many(json)` ship. Each row is `[s, p, o]` or
+`[s, p, o, graph]`; the term parser is shared with the single-row
+`rdf_insert` (pinned by `test_insert_many_parser_parity_with_single`).
+Return is the post-dedup count of newly inserted (or actually deleted)
+quads. Live contract is in the "Triple management" table above.
 
 ### 5. SPARQL UPDATE — LANDED in 0.5.0
 
-The upstream side is complete as of `v0.5.0`. The contract differs
-slightly from the originally-proposed wording:
+`sparql_update(query) → INTEGER` ships. The return is the **signed
+net delta in store size**, not "count of affected triples" —
+Oxigraph 0.4's `Store::update` doesn't expose an affected-row count,
+and computing one for mixed `DELETE/INSERT` operations would require
+re-evaluating the WHERE pattern. The delta is honest for
+single-direction updates; mixed ops should be observed via
+`rdf_count` / `sparql_ask` rather than the delta. Errors split into
+`SPARQL parse error: …` and `SPARQL evaluation error: …` prefixes;
+RS pattern-matches the prefix for refusal envelopes. Live contract
+is in the "SPARQL querying" table above.
 
-- `sparql_update(query TEXT) → INTEGER` — ships. ✓
-- The return is the **signed net delta in store size**, not "count
-  of affected triples" — Oxigraph 0.4's `Store::update` doesn't
-  expose an affected-row count, and computing one for mixed
-  `DELETE/INSERT` operations would require re-evaluating the WHERE
-  pattern. The delta is honest for single-direction updates; mixed
-  ops should be observed via `rdf_count` / `sparql_ask` rather than
-  the delta.
-- Errors split into `SPARQL parse error: …` (Oxigraph's
-  `EvaluationError::Parsing` — bad SPARQL syntax) and `SPARQL
-  evaluation error: …` (everything else). RS pattern-matches the
-  prefix for refusal envelopes.
+## Acceptance signals — RS-side adoption
 
-RS-side adoption: RS PLAN_0.3.0 routes any UPDATE-not-DATA form
-through `sparql_update`. The existing `INSERT DATA` / `DELETE DATA`
-/ `CLEAR ALL` special cases can be retained for return-value
-ergonomics (they translate naturally to the +N / -N delta) or
-collapsed into one path that always calls `sparql_update`.
+Each engine landing opens a corresponding RS-side adoption task.
+They are independent and can move in any order:
 
-### Acceptance signal
-
-When items #1 + #2 + (verified) #3 land — gating items for RS
-PLAN_0.2.0 Phase D — RS:
-
-1. Bumps `Gemfile.lock` to a new gem rev that opens Phase D.
-2. Removes the `:engine_unsupported` stub from `Semantica::Sparql`.
-3. Adds round-trip specs covering graph-scoped reads + writes.
-4. Updates this file: items #1–#3 graduate from "Requested" into
-   "SQL surfaces RS consumes."
-
-#4 (rdf_insert_many) graduates RS PLAN_0.2.0 Phase E independently
-of #1–#3; it can land first, last, or in parallel.
-
-#5 (sparql_update) **upstream complete** in `v0.5.0`. RS-side work
-is on RS's PLAN_0.3.0 (not yet written) — independent acceptance
-signal from #1–#4.
+- **#1 + #2 + #3** (named graphs) — RS PLAN_0.2.0 Phase D opens.
+  Drop the `:engine_unsupported` refusal envelopes from the
+  `graph:` kwarg paths. Route `INSERT DATA { GRAPH <iri> { … } }`
+  through `rdf_load_ntriples_to_graph`; route graph-scoped
+  `DELETE DATA` through 4-arg `rdf_delete`. Add round-trip specs
+  covering graph-scoped reads + writes.
+- **#4** (batched insert) — RS PLAN_0.2.0 Phase E opens. Implement
+  `Semantica::Sparql.bulk_insert(rows)` / `bulk_delete(rows)`
+  against `rdf_insert_many` / `rdf_delete_many`. Storable lifecycle
+  hooks adopt the bulk path; remove the `:engine_unsupported` stub
+  from the bulk methods.
+- **#5** (SPARQL UPDATE) — RS PLAN_0.3.0 opens. Route any
+  UPDATE-not-DATA form through `sparql_update`. The existing
+  `INSERT DATA` / `DELETE DATA` / `CLEAR ALL` special cases can be
+  retained for return-value ergonomics or collapsed into one path
+  that always calls `sparql_update`.
 
 ## Contact
 

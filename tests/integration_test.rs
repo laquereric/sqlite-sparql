@@ -547,6 +547,138 @@ mod tests {
         Ok(())
     }
 
+    // ── rdf_load_*_to_graph (PLAN_0.6.0) ─────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn test_rdf_load_ntriples_to_graph_roundtrip() -> Result<()> {
+        let conn = open_with_extension()?;
+        let nt = "\
+<http://e/a> <http://e/p> \"x\" .\n\
+<http://e/b> <http://e/p> \"y\" .\n\
+<http://e/c> <http://e/p> \"z\" .\n";
+
+        let loaded: i64 = conn.query_row(
+            "SELECT rdf_load_ntriples_to_graph(?, 'urn:g:bhphoto')",
+            rusqlite::params![nt],
+            |r| r.get(0),
+        )?;
+        assert_eq!(loaded, 3);
+
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT rdf_count()", [], |r| r.get(0))?,
+            0,
+            "default graph stays empty"
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>(
+                "SELECT rdf_count('urn:g:bhphoto')",
+                [],
+                |r| r.get(0)
+            )?,
+            3
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT rdf_count_all()", [], |r| r.get(0))?,
+            3
+        );
+
+        let json: String = conn.query_row(
+            "SELECT sparql_query('SELECT ?s WHERE { GRAPH <urn:g:bhphoto> { ?s ?p ?o } }')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(json.contains("http://e/a"), "got: {json}");
+        assert!(json.contains("http://e/b"), "got: {json}");
+        assert!(json.contains("http://e/c"), "got: {json}");
+
+        let default_json: String = conn.query_row(
+            "SELECT sparql_query('SELECT ?s WHERE { ?s ?p ?o }')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(
+            default_json == "[]" || default_json.is_empty(),
+            "default-graph query should be empty, got: {default_json}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_load_ntriples_to_graph_null_is_default() -> Result<()> {
+        let conn = open_with_extension()?;
+        let nt = "<http://e/only> <http://e/p> \"v\" .\n";
+        let loaded: i64 = conn.query_row(
+            "SELECT rdf_load_ntriples_to_graph(?, NULL)",
+            rusqlite::params![nt],
+            |r| r.get(0),
+        )?;
+        assert_eq!(loaded, 1);
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT rdf_count()", [], |r| r.get(0))?,
+            1
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT rdf_count_all()", [], |r| r.get(0))?,
+            1,
+            "NULL graph means default; no quad lands in any named graph"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_load_ntriples_to_graph_rejects_blank_node_graph() -> Result<()> {
+        let conn = open_with_extension()?;
+        let nt = "<http://e/s> <http://e/p> \"v\" .\n";
+        let err = conn
+            .query_row::<i64, _, _>(
+                "SELECT rdf_load_ntriples_to_graph(?, '_:bgraph')",
+                rusqlite::params![nt],
+                |r| r.get(0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("blank-node graphs"),
+            "expected blank-node rejection, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_load_ntriples_to_graph_parser_parity() -> Result<()> {
+        // The 2-arg loader must route through the same parser as the 1-arg
+        // form. Loading the same body into the default graph via either
+        // function must produce byte-identical rdf_dump_ntriples() output.
+        let nt = "\
+<http://e/a> <http://e/p> \"x\" .\n\
+<http://e/b> <http://e/p> \"y\" .\n";
+
+        let conn1 = open_with_extension()?;
+        conn1.query_row::<i64, _, _>(
+            "SELECT rdf_load_ntriples(?)",
+            rusqlite::params![nt],
+            |r| r.get(0),
+        )?;
+        let dump_1arg: String =
+            conn1.query_row("SELECT rdf_dump_ntriples()", [], |r| r.get(0))?;
+
+        let conn2 = open_with_extension()?;
+        conn2.query_row::<i64, _, _>(
+            "SELECT rdf_load_ntriples_to_graph(?, NULL)",
+            rusqlite::params![nt],
+            |r| r.get(0),
+        )?;
+        let dump_2arg: String =
+            conn2.query_row("SELECT rdf_dump_ntriples()", [], |r| r.get(0))?;
+
+        assert_eq!(dump_1arg, dump_2arg, "the two loader paths must agree");
+        Ok(())
+    }
+
     #[test]
     #[serial]
     fn test_vtab_named_graph_round_trip() -> Result<()> {

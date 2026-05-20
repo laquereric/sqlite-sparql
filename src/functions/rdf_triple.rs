@@ -7,7 +7,11 @@
 /// | `rdf_clear()`                       | Remove all triples and reset the store           |
 /// | `rdf_count()`                       | Return the number of triples in the store        |
 /// | `rdf_load_turtle(turtle_text)`      | Bulk-load triples from a Turtle-format string    |
+/// | `rdf_load_turtle_to_graph(b, g)`    | …into the named graph `g` (`NULL` → default)     |
 /// | `rdf_load_ntriples(ntriples_text)`  | Bulk-load triples from an N-Triples string       |
+/// | `rdf_load_ntriples_to_graph(b, g)`  | …into the named graph `g` (`NULL` → default)     |
+/// | `rdf_load_rdfxml(xml_text)`         | Bulk-load triples from an RDF/XML string         |
+/// | `rdf_load_rdfxml_to_graph(b, g)`    | …into the named graph `g` (`NULL` → default)     |
 /// | `rdf_dump_ntriples()`               | Dump all triples as an N-Triples string          |
 /// | `rdf_term_type(term)`               | Return "iri", "blank", or "literal"              |
 /// | `rdf_term_value(term)`              | Extract the string value from an N-Triples term  |
@@ -17,7 +21,8 @@ use sqlite_loadable::{api, define_scalar_function, prelude::*, FunctionFlags};
 use crate::error::SparqlError;
 use crate::store::{
     clear_store, delete_triple, delete_triple_in_graph, insert_triple,
-    insert_triple_in_graph, triple_count, triple_count_all, triple_count_in_graph, with_store,
+    insert_triple_in_graph, parse_graph_name, triple_count, triple_count_all,
+    triple_count_in_graph, with_store,
 };
 use sqlite_loadable::api::ValueType;
 
@@ -142,7 +147,22 @@ pub fn rdf_load_turtle_fn(
     values: &[*mut sqlite3_value],
 ) -> sqlite_loadable::Result<()> {
     let turtle = api::value_text(values.get(0).expect("Turtle text"))?;
-    let count = load_rdf(turtle, RdfFormat::Turtle).map_err(sqlite_loadable::Error::from)?;
+    let count = load_rdf(turtle, RdfFormat::Turtle, None)
+        .map_err(sqlite_loadable::Error::from)?;
+    api::result_int(context, count as i32);
+    Ok(())
+}
+
+/// 2-arg form: `rdf_load_turtle_to_graph(body, graph)`. `graph = NULL` →
+/// default graph (identical to the 1-arg form).
+pub fn rdf_load_turtle_to_graph_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let turtle = api::value_text(values.get(0).expect("Turtle text"))?;
+    let g = graph_arg(values.get(1).expect("graph"))?;
+    let count = load_rdf(turtle, RdfFormat::Turtle, g)
+        .map_err(sqlite_loadable::Error::from)?;
     api::result_int(context, count as i32);
     Ok(())
 }
@@ -154,7 +174,22 @@ pub fn rdf_load_ntriples_fn(
     values: &[*mut sqlite3_value],
 ) -> sqlite_loadable::Result<()> {
     let nt = api::value_text(values.get(0).expect("N-Triples text"))?;
-    let count = load_rdf(nt, RdfFormat::NTriples).map_err(sqlite_loadable::Error::from)?;
+    let count = load_rdf(nt, RdfFormat::NTriples, None)
+        .map_err(sqlite_loadable::Error::from)?;
+    api::result_int(context, count as i32);
+    Ok(())
+}
+
+/// 2-arg form: `rdf_load_ntriples_to_graph(body, graph)`. `graph = NULL` →
+/// default graph (identical to the 1-arg form).
+pub fn rdf_load_ntriples_to_graph_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let nt = api::value_text(values.get(0).expect("N-Triples text"))?;
+    let g = graph_arg(values.get(1).expect("graph"))?;
+    let count = load_rdf(nt, RdfFormat::NTriples, g)
+        .map_err(sqlite_loadable::Error::from)?;
     api::result_int(context, count as i32);
     Ok(())
 }
@@ -166,7 +201,22 @@ pub fn rdf_load_rdfxml_fn(
     values: &[*mut sqlite3_value],
 ) -> sqlite_loadable::Result<()> {
     let xml = api::value_text(values.get(0).expect("RDF/XML text"))?;
-    let count = load_rdf(xml, RdfFormat::RdfXml).map_err(sqlite_loadable::Error::from)?;
+    let count = load_rdf(xml, RdfFormat::RdfXml, None)
+        .map_err(sqlite_loadable::Error::from)?;
+    api::result_int(context, count as i32);
+    Ok(())
+}
+
+/// 2-arg form: `rdf_load_rdfxml_to_graph(body, graph)`. `graph = NULL` →
+/// default graph (identical to the 1-arg form).
+pub fn rdf_load_rdfxml_to_graph_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let xml = api::value_text(values.get(0).expect("RDF/XML text"))?;
+    let g = graph_arg(values.get(1).expect("graph"))?;
+    let count = load_rdf(xml, RdfFormat::RdfXml, g)
+        .map_err(sqlite_loadable::Error::from)?;
     api::result_int(context, count as i32);
     Ok(())
 }
@@ -243,24 +293,30 @@ fn extract_term_value(term: &str) -> crate::error::Result<String> {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-use oxigraph::model::GraphName;
+fn load_rdf(
+    text: &str,
+    format: RdfFormat,
+    graph: Option<&str>,
+) -> crate::error::Result<usize> {
+    // Resolve the graph IRI once. `None` → default graph, preserving the 1-arg
+    // loader contract; `Some(iri)` → named graph, with the same blank-node /
+    // empty-string rejection as the 4-arg `rdf_insert` path.
+    let graph_name = parse_graph_name(graph)?;
 
-fn load_rdf(text: &str, format: RdfFormat) -> crate::error::Result<usize> {
     with_store(|store| {
         let mut count = 0usize;
         let parser = RdfParser::from_format(format);
         for quad_result in parser.for_reader(text.as_bytes()) {
             let quad = quad_result
                 .map_err(|e| SparqlError::RdfParseError(e.to_string()))?;
-            // Force all triples into the default graph
-            let dg_quad = oxigraph::model::Quad::new(
+            let routed = oxigraph::model::Quad::new(
                 quad.subject,
                 quad.predicate,
                 quad.object,
-                GraphName::DefaultGraph,
+                graph_name.clone(),
             );
             store
-                .insert(&dg_quad)
+                .insert(&routed)
                 .map_err(|e| SparqlError::StoreError(e.to_string()))?;
             count += 1;
         }
@@ -306,6 +362,13 @@ pub fn register(db: *mut sqlite3) -> sqlite_loadable::Result<()> {
     )?;
     define_scalar_function(
         db,
+        "rdf_load_turtle_to_graph",
+        2,
+        rdf_load_turtle_to_graph_fn,
+        FunctionFlags::UTF8,
+    )?;
+    define_scalar_function(
+        db,
         "rdf_load_ntriples",
         1,
         rdf_load_ntriples_fn,
@@ -313,9 +376,23 @@ pub fn register(db: *mut sqlite3) -> sqlite_loadable::Result<()> {
     )?;
     define_scalar_function(
         db,
+        "rdf_load_ntriples_to_graph",
+        2,
+        rdf_load_ntriples_to_graph_fn,
+        FunctionFlags::UTF8,
+    )?;
+    define_scalar_function(
+        db,
         "rdf_load_rdfxml",
         1,
         rdf_load_rdfxml_fn,
+        FunctionFlags::UTF8,
+    )?;
+    define_scalar_function(
+        db,
+        "rdf_load_rdfxml_to_graph",
+        2,
+        rdf_load_rdfxml_to_graph_fn,
         FunctionFlags::UTF8,
     )?;
     define_scalar_function(

@@ -151,6 +151,16 @@ required:
   1.1 UPDATE. MM mutates via `Storable` lifecycle hooks (which call
   `rdf_insert`/`rdf_delete`), so UPDATE is unused. RS exposes it
   through `Semantica::Sparql.execute` for the gem-level facade.
+- `rdf_load_ntriples_to_graph(body, graph) → INTEGER` (from 0.6.0) —
+  bulk-load an N-Triples body into a named graph in one FFI call.
+  MM tripler output goes through `Storable` lifecycle hooks
+  (single-row `rdf_insert` or batched `rdf_insert_many`), so the
+  loader path is unused by MM. RS routes graph-tagged `INSERT DATA`
+  through it.
+- `rdf_load_turtle_to_graph(body, graph)` /
+  `rdf_load_rdfxml_to_graph(body, graph)` (from 0.6.0) — siblings
+  for the Turtle / RDF/XML parsers. Same graph routing convention;
+  no MM consumer.
 - `rdf_load_rdfxml(text)` — MM doesn't bulk-load RDF/XML.
 - `rdf_dump_ntriples()` — MM doesn't dump.
 - `rdf_term_type` / `rdf_term_value` — MM hands string-typed values

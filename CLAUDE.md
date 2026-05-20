@@ -144,8 +144,11 @@ SELECT rdf_delete(subject, predicate, object);   -- returns 1
 SELECT rdf_clear();                              -- returns 1
 SELECT rdf_count();                              -- returns INTEGER
 SELECT rdf_load_turtle(turtle_text);             -- returns count loaded
+SELECT rdf_load_turtle_to_graph(turtle_text, graph_iri);    -- 0.6.0; NULL graph = default
 SELECT rdf_load_ntriples(ntriples_text);         -- returns count loaded
+SELECT rdf_load_ntriples_to_graph(ntriples_text, graph_iri); -- 0.6.0; NULL graph = default
 SELECT rdf_load_rdfxml(rdfxml_text);             -- returns count loaded
+SELECT rdf_load_rdfxml_to_graph(rdfxml_text, graph_iri);    -- 0.6.0; NULL graph = default
 SELECT rdf_dump_ntriples();                      -- returns TEXT
 ```
 
