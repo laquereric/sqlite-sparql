@@ -288,6 +288,184 @@ single-direction updates; mixed ops should be observed via
 RS pattern-matches the prefix for refusal envelopes. Live contract
 is in the "SPARQL querying" table above.
 
+## Requested extensions (toward future engine releases)
+
+> **Posture.** None of the items below are blockers — RS PLANs
+> 0.9.0 / 0.10.0 / 0.11.0 / 0.12.0 all ship against the engine's
+> existing 0.7.0 surfaces (every OWL 2 RL rule, every SHACL Core
+> constraint, every SHACL Rule's CONSTRUCT, and every DRed phase
+> is expressible as a SPARQL UPDATE or SPARQL query that routes
+> through `sparql_update` / `sparql_query`). These asks would
+> unlock a *next horizon* of work — predominantly performance —
+> if substrate-side telemetry (MM Conformer / vv-memory Silver)
+> shows that the SPARQL-driven shape is the bottleneck. Priority
+> is "revisit on first concrete bottleneck signal," not
+> "schedule a release."
+>
+> Each ask has an originating RS plan. The upstream plan-side
+> work (if/when it lands) gets its own engine-side `PLAN_0.X.0.md`
+> in this repo — the spec belongs here, the implementation
+> strategy belongs in this repo's plan dir.
+
+### 6. Native OWL 2 RL rule pass
+
+**Originating RS plan:** `docs/plans/PLAN_0.9.0.md` ("Engine
+prerequisites" → option 1: "Engine-side rule application").
+
+**Ask.** A native Rust pass that walks the Oxigraph store
+directly to apply the OWL 2 RL rule set in place of the gem's
+per-rule `sparql_update` round-trip. Order-of-magnitude faster
+on large closures; skips the SPARQL parser per rule.
+
+**Concrete surface RS would call:**
+
+```sql
+-- Single FFI crossing; returns net-derived count.
+SELECT rdf_owl_rl_materialise(
+  'urn:mm:graph:catalogue',                      -- asserted graph (or NULL = default)
+  'urn:mm:graph:catalogue:inferred',             -- inferred graph
+  json('{"max_iterations": 50, "provenance": true}')   -- options
+);
+-- => INTEGER (net triples derived)
+```
+
+**Why this would help RS.** Today's `Reasoner.materialise!` issues
+one `sparql_update` per OWL 2 RL rule per fixpoint iteration —
+~70 rules × N iterations. Each crossing pays the SPARQL parser
+cost twice (write + the embedded WHERE's read). A native pass
+amortises both.
+
+**Compatibility constraint.** Provenance shape must match RS's
+RDF-star `:derivedBy <semantica:rule_iri> ; :derivedAt …` form
+(or be configurable to do so). RS PLAN_0.9.0 Phase E pins the
+exact predicate IRIs; the engine pass would mirror them.
+
+### 7. Native SHACL Core validator pass
+
+**Originating RS plan:** `docs/plans/PLAN_0.10.0.md` ("Engine
+prerequisites" → option 1: "Engine-side validator").
+
+**Ask.** A native Rust pass that evaluates SHACL Core constraints
+against a data graph in place of the gem's per-constraint /
+per-focus-node `sparql_query` round-trip. The pass produces a
+W3C-conformant `sh:ValidationReport` graph as output.
+
+**Concrete surface RS would call:**
+
+```sql
+SELECT rdf_shacl_core_validate(
+  'urn:mm:graph:catalogue',                      -- data graph
+  'urn:semantica:shapes:product',                -- shapes graph
+  'urn:mm:graph:catalogue:report',               -- report graph (cleared + rewritten)
+  json('{"provenance": true}')
+);
+-- => INTEGER (count of violations; 0 = conforms)
+```
+
+**Why this would help RS.** Today's `Shacl.validate!` is
+O(focus_nodes × constraints × shapes). Each constraint
+evaluation is a separate `sparql_ask` or `sparql_query`.
+Engine-side evaluation walks the store once per shape and
+batches the constraint checks.
+
+**Compatibility constraint.** Report graph shape must match
+RS PLAN_0.10.0 Phase E's pinned predicates (`sh:focusNode`,
+`sh:resultPath`, `sh:sourceShape`, `sh:sourceConstraintComponent`,
+`sh:resultSeverity`, `sh:resultMessage`) and the optional
+RDF-star provenance annotations.
+
+### 8. Native dependency index for DRed
+
+**Originating RS plan:** `docs/plans/PLAN_0.11.0.md` ("Engine
+prerequisites" → option 1: "Native dependency index").
+
+**Ask.** A side-table inside the engine mapping each
+inferred-triple ID to its premise triple IDs, maintained as a
+write-through during `rdf_owl_rl_materialise` /
+`rdf_shacl_rules_materialise` (ask #6 + #9). DRed's
+over-deletion phase (PLAN_0.11.0 Phase B) consults this index
+instead of pattern-matching against `:derivedFrom` RDF-star
+annotations.
+
+**Concrete surface RS would call:**
+
+```sql
+-- Over-delete every inferred triple whose support touches a retracted premise.
+SELECT rdf_dred_overdelete(
+  'urn:mm:graph:catalogue:inferred',
+  json('[ ["urn:mm:product:1", "schema:gtin", "1234567890123"] ]')  -- retracted premises
+);
+-- => INTEGER (over-deleted count)
+```
+
+**Why this would help RS.** Today's DRed pattern-matches the
+`:derivedFrom` annotation graph for every retracted premise.
+On a dense provenance graph (high fan-in per inferred triple)
+this is O(retracted × inferred-with-overlap) and is the
+prime DRed bottleneck. A native index makes the lookup O(log N)
+per premise.
+
+**Compatibility constraint.** Index must survive engine restarts
+if the inferred graph is persisted (today it doesn't — store
+is in-memory — but PLAN_0.7.0's EtherealGraph reloads the
+inferred graph blob; the index would be rebuildable from the
+RDF-star annotations on hydrate).
+
+### 9. Batched SHACL Rules execution
+
+**Originating RS plan:** `docs/plans/PLAN_0.12.0.md` ("Engine
+prerequisites" → option 1: "Batched rule execution").
+
+**Ask.** Engine accepts a list of CONSTRUCT queries and emits
+the union of their bindings as a single INSERT, saving the
+per-rule SPARQL parse cost.
+
+**Concrete surface RS would call:**
+
+```sql
+SELECT rdf_construct_many(
+  'urn:mm:graph:catalogue:inferred',
+  json('[
+    "CONSTRUCT { ?focus mm:availability \"in_stock\" } WHERE { ?focus mm:inventory ?n . FILTER(?n > 0) }",
+    "CONSTRUCT { ?focus mm:tier mm:VIP }            WHERE { ?focus mm:total_orders ?n . FILTER(?n > 100) }",
+    ...
+  ]')
+);
+-- => INTEGER (net triples inserted across all CONSTRUCTs)
+```
+
+**Why this would help RS.** Today's `Shacl::Rules.materialise!`
+issues one `sparql_update` per SHACL Rule per fixpoint
+iteration. A shape with ~50 SHACL Rules pays the parser cost
+50× per iteration; batched execution drops that to 1×.
+
+**Compatibility constraint.** Each CONSTRUCT's bindings must
+be attributable back to the originating rule (so RS can emit
+the correct `:derivedBy <rule_iri>` annotation). Either: the
+engine accepts a `[query, rule_iri]` pair list and emits
+provenance triples itself, or returns a per-query breakdown
+RS uses to emit annotations gem-side.
+
+### 10. Differential dataflow at the store layer
+
+**Originating RS plan:** `docs/plans/PLAN_0.11.0.md` ("Engine
+prerequisites" → option 2: "Differential dataflow at the store
+layer"). Also surfaces in PLAN_0.9.0 as the second engine
+acceleration item.
+
+**Ask.** Multi-version concurrent dataflow over the asserted
+graph; the closure updates as a stream of deltas rather than
+re-running rules on every write. Much further-out — RDFox is
+the reference implementation, with a substantially different
+storage shape than Oxigraph.
+
+**Posture.** Genuinely out-of-reach for incremental engine work;
+revive only if MM signals a workload that can't be served by
+asks #6 + #8 combined. The substrate has architectural choices
+to make before the engine should take this on (e.g., move from
+Oxigraph to RDFox as the store; or keep Oxigraph as the
+backing store and bolt a differential-dataflow index on top).
+
 ## Acceptance signals — RS-side adoption
 
 Each engine landing opens a corresponding RS-side adoption task.
