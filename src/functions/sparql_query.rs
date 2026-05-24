@@ -1,17 +1,24 @@
-/// `sparql_query(query_string)` → JSON string
+/// SPARQL query scalar functions:
 ///
-/// Executes a SPARQL SELECT query against the thread-local Oxigraph store and
-/// returns the result set as a JSON array of objects.
+/// | SQL Function                       | Returns                                       |
+/// |------------------------------------|-----------------------------------------------|
+/// | `sparql_query(query)`              | JSON array of solution objects (SELECT)       |
+/// | `sparql_ask(query)`                | `0` or `1` (ASK)                              |
+/// | `sparql_construct(query)`          | N-Triples-(star) text (CONSTRUCT)             |
+/// | `rdf_construct_many(queries_json)` | JSON array of N-Triples blobs (since 0.8.0)   |
+/// | `sparql_update(query)`             | Signed net delta in store size (since 0.5.0)  |
 ///
-/// Each row in the result set becomes a JSON object whose keys are the
-/// projected variable names and whose values are the RDF term representations.
+/// `sparql_query` returns a JSON array of binding objects whose keys are
+/// the projected variable names and whose values are the bound terms in
+/// N-Triples encoding (RDF-star quoted triples emit as `<< s p o >>`
+/// since 0.7.0).
 ///
 /// # Example (SQL)
 /// ```sql
 /// SELECT sparql_query('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
 /// -- Returns: [{"s":"http://...","p":"http://...","o":"\"hello\""}]
 /// ```
-use oxigraph::sparql::{EvaluationError, QueryResults, QuerySolution};
+use oxigraph::sparql::{EvaluationError, Query, QueryResults, QuerySolution};
 use sqlite_loadable::{api, define_scalar_function, prelude::*, FunctionFlags};
 
 use crate::error::SparqlError;
@@ -54,6 +61,27 @@ pub fn sparql_construct_fn(
     let turtle = execute_sparql_construct(query_str).map_err(sqlite_loadable::Error::from)?;
 
     api::result_text(context, &turtle)?;
+    Ok(())
+}
+
+/// Scalar function: `rdf_construct_many(queries_json) -> TEXT (JSON array)`.
+///
+/// One FFI crossing for N CONSTRUCTs. Returns a JSON array of N
+/// N-Triples blobs, one per input query. Per-query attribution is
+/// preserved; provenance shape stays on the consumer side. See
+/// PLAN_0.8.0.md.
+pub fn rdf_construct_many_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let queries_json = api::value_text(
+        values
+            .get(0)
+            .expect("1st argument: JSON array of CONSTRUCT queries"),
+    )?;
+    let json_result = execute_sparql_construct_many(queries_json)
+        .map_err(sqlite_loadable::Error::from)?;
+    api::result_text(context, &json_result)?;
     Ok(())
 }
 
@@ -183,6 +211,66 @@ fn execute_sparql_construct(query_str: &str) -> crate::error::Result<String> {
     })
 }
 
+/// Evaluates N CONSTRUCT queries in one FFI crossing and returns a
+/// JSON array of N N-Triples blobs. Per-query attribution preserved.
+/// See PLAN_0.8.0.md for the return-shape rationale.
+///
+/// Atomicity: all queries are parse-validated up front; if any parse
+/// fails the batch errors with `(query index N)` before any
+/// evaluation runs. CONSTRUCT is read-only, so partial-on-evaluation
+/// has no rollback question.
+fn execute_sparql_construct_many(queries_json: &str) -> crate::error::Result<String> {
+    let queries: Vec<String> = serde_json::from_str(queries_json).map_err(|e| {
+        SparqlError::InvalidArgument(format!(
+            "rdf_construct_many: expected JSON array of query strings: {e}"
+        ))
+    })?;
+
+    for (i, q) in queries.iter().enumerate() {
+        if let Err(e) = Query::parse(q, None) {
+            return Err(SparqlError::ParseError(format!(
+                "SPARQL parse error (query index {i}): {e}"
+            )));
+        }
+    }
+
+    with_store(|store| {
+        let mut results: Vec<String> = Vec::with_capacity(queries.len());
+        for (i, q) in queries.iter().enumerate() {
+            let qres = store.query(q).map_err(|e| {
+                SparqlError::EvalError(format!(
+                    "SPARQL evaluation error (query index {i}): {e}"
+                ))
+            })?;
+            match qres {
+                QueryResults::Graph(triples) => {
+                    let mut blob = String::new();
+                    for t in triples {
+                        let t = t.map_err(|e| {
+                            SparqlError::EvalError(format!(
+                                "evaluation (query index {i}): {e}"
+                            ))
+                        })?;
+                        blob.push_str(&format!(
+                            "{} {} {} .\n",
+                            term_to_ntriples_subject(&t.subject),
+                            format!("<{}>", t.predicate.as_str()),
+                            term_to_ntriples(&t.object),
+                        ));
+                    }
+                    results.push(blob);
+                }
+                _ => {
+                    return Err(SparqlError::InvalidArgument(format!(
+                        "rdf_construct_many: query index {i} is not a CONSTRUCT"
+                    )));
+                }
+            }
+        }
+        serde_json::to_string(&results).map_err(SparqlError::JsonError)
+    })
+}
+
 // ── Term serialisation ────────────────────────────────────────────────────────
 
 use oxigraph::model::{Subject, Term};
@@ -238,6 +326,13 @@ pub fn register(db: *mut sqlite3) -> sqlite_loadable::Result<()> {
         "sparql_construct",
         1,
         sparql_construct_fn,
+        FunctionFlags::UTF8,
+    )?;
+    define_scalar_function(
+        db,
+        "rdf_construct_many",
+        1,
+        rdf_construct_many_fn,
         FunctionFlags::UTF8,
     )?;
     define_scalar_function(

@@ -121,6 +121,7 @@ graph-routing assumptions break too — coordinate.
 | `sparql_query(query TEXT) → TEXT` | `Semantica::Sparql.select(query)` | Returns a JSON-encoded string parseable by Ruby's `JSON.parse` into an `Array<Hash>`. Keys are SPARQL variable names. Values are bound terms in **N-Triples encoding** (IRIs in `<>`, literals quoted). Empty result set returns `"[]"` or NULL — RS normalises both to `[]`. |
 | `sparql_ask(query TEXT) → INTEGER` | `Semantica::Sparql.ask(query)` | Returns `0` or `1`. RS coerces to `true`/`false`. |
 | `sparql_construct(query TEXT) → TEXT` | `Semantica::Sparql.construct(query)` | Returns N-Triples-formatted text. RS passes through unchanged. |
+| `rdf_construct_many(queries_json TEXT) → TEXT` (from 0.8.0) | `Semantica::Shacl::Rules.materialise!` (once RS PLAN_0.12.0 routes through it) | `queries_json` is a JSON array of CONSTRUCT query strings. Returns a JSON array of the same length where the `i`-th element is the N-Triples output of the `i`-th query. Per-query attribution preserved so RS can attach `:derivedBy <rule_iri>` annotations rule-by-rule. CONSTRUCT stays read-only — engine does not insert results into the store. Errors: parse failures abort the whole batch with `SPARQL parse error (query index N): …`; non-CONSTRUCT queries error with `rdf_construct_many: query index N is not a CONSTRUCT`; non-array JSON with `rdf_construct_many: expected JSON array of query strings`. |
 | `sparql_update(query TEXT) → INTEGER` (from 0.5.0) | `Semantica::Sparql.execute(any_update)` | Runs any SPARQL 1.1 UPDATE form. Returns **signed net delta** in store size (`+N` insert / `-N` delete / `inserts - deletes` for mixed). Errors split into `SPARQL parse error: …` and `SPARQL evaluation error: …` prefixes; RS pattern-matches the prefix for its refusal envelopes. |
 
 The leading/trailing quote/bracket characters in `sparql_query`'s
@@ -411,40 +412,29 @@ is in-memory — but PLAN_0.7.0's EtherealGraph reloads the
 inferred graph blob; the index would be rebuildable from the
 RDF-star annotations on hydrate).
 
-### 9. Batched SHACL Rules execution
+### 9. Batched SHACL Rules execution — LANDED in 0.8.0
 
-**Originating RS plan:** `docs/plans/PLAN_0.12.0.md` ("Engine
-prerequisites" → option 1: "Batched rule execution").
+Live as `rdf_construct_many(queries_json TEXT) → TEXT`. See the
+"SPARQL querying" row above for the live contract. Two notes on
+how the landed shape differs from the original ask:
 
-**Ask.** Engine accepts a list of CONSTRUCT queries and emits
-the union of their bindings as a single INSERT, saving the
-per-rule SPARQL parse cost.
+- Return is a **JSON array of N-Triples blobs**, not an integer
+  count. The original ask sketched both options ("engine emits
+  provenance itself" vs "returns a per-query breakdown"); landed
+  the second — engine stays domain-agnostic, RS attaches
+  `:derivedBy <rule_iri>` annotations gem-side per-query before
+  bulk-inserting via `rdf_insert_many`. Per-query attribution
+  preserved by the position-in-array convention.
+- CONSTRUCT is **read-only** — the engine evaluates the queries
+  but does not insert results into a target graph. The original
+  ask sketched a target-graph argument; that's now reachable
+  client-side via `rdf_insert_many` after the consumer attaches
+  whatever annotations / graph-routing it wants. The name
+  `rdf_construct_many_with_provenance` is deliberately left
+  unoccupied for a future engine-side annotation variant.
 
-**Concrete surface RS would call:**
-
-```sql
-SELECT rdf_construct_many(
-  'urn:mm:graph:catalogue:inferred',
-  json('[
-    "CONSTRUCT { ?focus mm:availability \"in_stock\" } WHERE { ?focus mm:inventory ?n . FILTER(?n > 0) }",
-    "CONSTRUCT { ?focus mm:tier mm:VIP }            WHERE { ?focus mm:total_orders ?n . FILTER(?n > 100) }",
-    ...
-  ]')
-);
--- => INTEGER (net triples inserted across all CONSTRUCTs)
-```
-
-**Why this would help RS.** Today's `Shacl::Rules.materialise!`
-issues one `sparql_update` per SHACL Rule per fixpoint
-iteration. A shape with ~50 SHACL Rules pays the parser cost
-50× per iteration; batched execution drops that to 1×.
-
-**Compatibility constraint.** Each CONSTRUCT's bindings must
-be attributable back to the originating rule (so RS can emit
-the correct `:derivedBy <rule_iri>` annotation). Either: the
-engine accepts a `[query, rule_iri]` pair list and emits
-provenance triples itself, or returns a per-query breakdown
-RS uses to emit annotations gem-side.
+See `docs/plans/PLAN_0.8.0.md` for the full return-shape and
+atomicity rationale.
 
 ### 10. Differential dataflow at the store layer
 

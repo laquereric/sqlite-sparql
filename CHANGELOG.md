@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.8.0 — Batched CONSTRUCT
+
+`rdf_construct_many(queries_json TEXT) → TEXT` evaluates N CONSTRUCT
+queries in one FFI crossing. The return is a JSON array of N
+N-Triples blobs — one per input query — preserving per-query
+attribution so consumers can annotate per-rule downstream before
+inserting. Matches the `_many` convention from 0.4.0 (`rdf_insert_many`)
+and 0.6.0 (`rdf_load_*_to_graph`).
+
+Driver: `CONSUMER_REQUIREMENT_RS.md` § "Requested extensions" item
+#9 (Batched SHACL Rules execution), added in the post-v0.7.0 doc
+update. RS's `Shacl::Rules.materialise!` issues one `sparql_update`
+per rule per fixpoint iteration; ~50 rules per iteration paying the
+SQL + FFI overhead 50× collapses to 1× with this scalar. (The
+per-rule SPARQL parse cost still happens N× — Oxigraph parses each
+query at evaluation time. The savings are on the SQL/FFI side, not
+the SPARQL parser. A prepared-query model would be a separate, much
+larger plan.)
+
+Surface:
+
+- `rdf_construct_many(queries_json TEXT) → TEXT` — `queries_json`
+  is a JSON array of CONSTRUCT query strings. Returns a JSON array
+  of the same length where the `i`-th element is the N-Triples
+  output of the `i`-th query (an empty string when the query
+  binds zero triples).
+
+Decisions worth flagging for consumers:
+
+- **JSON array of N-Triples blobs**, not a flat blob or an integer
+  count. Flat would lose per-query attribution; integer would imply
+  the engine inserts results (it doesn't — CONSTRUCT is read-only,
+  and provenance shape is RS's call, not ours). See `docs/plans/PLAN_0.8.0.md`
+  for the full rationale.
+- **Provenance stays out of the engine.** Same posture as PLAN_0.7.0:
+  the engine emits data, the consumer (RS) attaches `:derivedBy`
+  / `:derivedAt` annotations downstream. The name
+  `rdf_construct_many_with_provenance` is deliberately left
+  unoccupied for a future engine-side annotation variant if RS asks.
+- **All-or-nothing pre-flight parse.** Every query is parsed up
+  front; if any fails the batch errors with the prefix
+  `SPARQL parse error (query index N):` before any query evaluates.
+  Matches `rdf_insert_many`'s atomicity contract.
+- **Non-CONSTRUCT input is rejected** with the prefix
+  `rdf_construct_many: query index N is not a CONSTRUCT`.
+- **Non-array JSON input is rejected** with the prefix
+  `rdf_construct_many: expected JSON array of query strings`.
+
+No surface change to `sparql_construct` (1-arg). 1-element batches
+are byte-identical to the 1-arg path — pinned by
+`test_rdf_construct_many_parser_parity_with_single`.
+
+RDF-star CONSTRUCT outputs (quoted-triple subjects from 0.7.0) flow
+through unchanged — pinned by `test_rdf_construct_many_with_rdf_star`.
+
 ## 0.7.0 — RDF-star / SPARQL-star round-trip
 
 Quoted-triple terms now survive the SQL boundary in both directions.

@@ -1470,4 +1470,191 @@ mod tests {
         );
         Ok(())
     }
+
+    // ── 0.8.0 rdf_construct_many ──────────────────────────────────────────────
+    //
+    // Batched CONSTRUCT — one FFI crossing for N queries. Returns a JSON
+    // array of per-query N-Triples blobs. See PLAN_0.8.0.md for the
+    // return-shape rationale (per-query attribution preserved; provenance
+    // shape stays on the consumer side).
+
+    /// Test 1 — basic round-trip. Two CONSTRUCTs over the same data; each
+    /// blob re-parses into the expected quad count.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_basic() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/a', 'http://e/p', 'http://e/b');
+             SELECT rdf_insert('http://e/c', 'http://e/p', 'http://e/d');",
+        )?;
+
+        let queries_json = r#"[
+            "CONSTRUCT { ?s <http://e/q1> ?o } WHERE { ?s <http://e/p> ?o }",
+            "CONSTRUCT { ?s <http://e/q2> ?o } WHERE { ?s <http://e/p> ?o }"
+        ]"#;
+        let json: String = conn
+            .query_row("SELECT rdf_construct_many(?)", [queries_json], |r| r.get(0))?;
+
+        let arr: Vec<String> = serde_json::from_str(&json).expect("valid JSON array");
+        assert_eq!(arr.len(), 2, "two queries → two blobs");
+        assert!(arr[0].contains("<http://e/q1>"), "blob 0 uses q1: {}", arr[0]);
+        assert!(arr[1].contains("<http://e/q2>"), "blob 1 uses q2: {}", arr[1]);
+
+        // Round-trip blob 0 into a clean store via rdf_load_ntriples.
+        conn.execute_batch("SELECT rdf_clear();")?;
+        let reloaded: i64 = conn
+            .query_row("SELECT rdf_load_ntriples(?)", [&arr[0]], |r| r.get(0))?;
+        assert_eq!(reloaded, 2, "blob 0 should re-parse to 2 quads");
+        Ok(())
+    }
+
+    /// Test 2 — parser parity. Same query through `sparql_construct` (1-arg)
+    /// and as a 1-element batch through `rdf_construct_many` must produce
+    /// byte-identical blobs.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_parser_parity_with_single() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/a', 'http://e/p', 'http://e/b');
+             SELECT rdf_insert('http://e/c', 'http://e/p', 'http://e/d');",
+        )?;
+        let query = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }";
+
+        let single: String =
+            conn.query_row("SELECT sparql_construct(?)", [query], |r| r.get(0))?;
+
+        let queries_json = serde_json::to_string(&vec![query]).unwrap();
+        let batched_json: String = conn
+            .query_row("SELECT rdf_construct_many(?)", [&queries_json], |r| r.get(0))?;
+        let arr: Vec<String> = serde_json::from_str(&batched_json).unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0], single, "1-element batch must match the 1-arg path byte-for-byte");
+        Ok(())
+    }
+
+    /// Test 3 — empty array. Degenerate input returns `[]`, no store mutation.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_empty_array() -> Result<()> {
+        let conn = open_with_extension()?;
+        let json: String =
+            conn.query_row("SELECT rdf_construct_many('[]')", [], |r| r.get(0))?;
+        assert_eq!(json, "[]");
+        let count: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(count, 0, "CONSTRUCT is read-only — store stays empty");
+        Ok(())
+    }
+
+    /// Test 4 — pre-flight parse error aborts the batch with the indexed
+    /// prefix. Pins the all-or-nothing contract.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_parse_error_aborts_batch() -> Result<()> {
+        let conn = open_with_extension()?;
+        let queries_json = r#"[
+            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            "THIS IS NOT SPARQL",
+            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"
+        ]"#;
+        let err = conn
+            .query_row::<String, _, _>(
+                "SELECT rdf_construct_many(?)",
+                [queries_json],
+                |r| r.get(0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("SPARQL parse error (query index 1)"),
+            "error must name the failing query index; got: {err}"
+        );
+        Ok(())
+    }
+
+    /// Test 5 — non-CONSTRUCT query in the batch errors with the
+    /// `rdf_construct_many:` prefix. Pins that CONSTRUCT shape is required.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_rejects_non_construct() -> Result<()> {
+        let conn = open_with_extension()?;
+        let queries_json = r#"[
+            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            "SELECT ?s WHERE { ?s ?p ?o }"
+        ]"#;
+        let err = conn
+            .query_row::<String, _, _>(
+                "SELECT rdf_construct_many(?)",
+                [queries_json],
+                |r| r.get(0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("rdf_construct_many: query index 1 is not a CONSTRUCT"),
+            "error must call out the SELECT-vs-CONSTRUCT mismatch; got: {err}"
+        );
+        Ok(())
+    }
+
+    /// Test 6 — non-array JSON input is rejected with the fixed-prefix
+    /// error consuming gems prefix-match.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_rejects_non_array_json() -> Result<()> {
+        let conn = open_with_extension()?;
+        for bad in [
+            r#"not json at all"#,
+            r#"{"not": "array"}"#,
+            r#"[1, 2, 3]"#, // numbers, not strings
+        ] {
+            let err = conn
+                .query_row::<String, _, _>(
+                    "SELECT rdf_construct_many(?)",
+                    [bad],
+                    |r| r.get(0),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("rdf_construct_many: expected JSON array of query strings"),
+                "bad input {bad:?} must surface the fixed-prefix error; got: {err}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Test 7 — RDF-star outputs flow through unchanged. A CONSTRUCT whose
+    /// subject binds a quoted triple emits `<< s p o >>` in the blob.
+    #[test]
+    #[serial]
+    fn test_rdf_construct_many_with_rdf_star() -> Result<()> {
+        let conn = open_with_extension()?;
+        let turtle = r#"
+            @prefix : <http://example.org/> .
+            :bob :name "Bob" {| :statedBy :alice |} .
+        "#;
+        let _: i64 =
+            conn.query_row("SELECT rdf_load_turtle(?)", [turtle], |r| r.get(0))?;
+
+        let queries_json = r#"[
+            "PREFIX : <http://example.org/> CONSTRUCT { ?t :wasStatedBy ?stater } WHERE { ?t :statedBy ?stater }"
+        ]"#;
+        let json: String = conn
+            .query_row("SELECT rdf_construct_many(?)", [queries_json], |r| r.get(0))?;
+        let arr: Vec<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(arr.len(), 1);
+        assert!(
+            arr[0].contains("<<") && arr[0].contains(">>"),
+            "star CONSTRUCT must emit quoted-triple subject; got: {}",
+            arr[0]
+        );
+        assert!(
+            arr[0].contains("wasStatedBy"),
+            "blob should contain the constructed predicate; got: {}",
+            arr[0]
+        );
+        Ok(())
+    }
 }

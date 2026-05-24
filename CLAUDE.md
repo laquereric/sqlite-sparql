@@ -126,20 +126,29 @@ stubbing them. New scalars: `rdf_triple_subject`, `rdf_triple_predicate`,
 `rdf_triple_object`. `rdf_term_type` returns `"triple"`. See
 `docs/plans/PLAN_0.7.0.md` and `docs/research/StarExts.md`.
 
-### 5. Persistent Store (RocksDB backend) — DEFERRED
+### 5. Batched CONSTRUCT — DONE in 0.8.0
+`rdf_construct_many(queries_json TEXT) → TEXT` evaluates an array
+of CONSTRUCT queries in one FFI crossing and returns a JSON array
+of per-query N-Triples blobs. Per-query attribution preserved so
+consumers can annotate per-rule before inserting. CONSTRUCT stays
+read-only — the engine does not write results into the store.
+Driver: RS PLAN_0.12.0's Shacl Rules materialise loop. See
+`docs/plans/PLAN_0.8.0.md`.
+
+### 6. Persistent Store (RocksDB backend) — DEFERRED
 No consumer asks for persistence. If it lands, replace the in-memory
 `Store::new()` in `store.rs` with `Store::open(path)` (Oxigraph's
 RocksDB-backed persistent store) and expose the path via a
 `rdf_open(path TEXT)` SQL function or an extension argument. Revive
 on first consumer ask.
 
-### 6. Rails Gem Wrapper (`sqlite-sparql-ruby`)
+### 7. Rails Gem Wrapper (`sqlite-sparql-ruby`)
 Create a companion Ruby gem that:
 - Ships the pre-compiled `.dylib`/`.so` for common platforms
 - Exposes a `SqliteSparql.load(db)` method (mirroring `sqlite-vec`'s pattern)
 - Provides an ActiveRecord concern `HasRdfTriples` for model-level helpers
 
-### 7. SPARQL Endpoint Middleware
+### 8. SPARQL Endpoint Middleware
 Add a Rack/Rails middleware that exposes a `/sparql` HTTP endpoint accepting
 SPARQL queries over the wire (SPARQL Protocol 1.1).
 
@@ -194,6 +203,17 @@ SELECT sparql_ask('ASK { <http://example.org/alice> ?p ?o }');
 
 -- CONSTRUCT → N-Triples text
 SELECT sparql_construct('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+
+-- 0.8.0: batched CONSTRUCT → JSON array of per-query N-Triples blobs
+SELECT rdf_construct_many(json('[
+  "CONSTRUCT { ?s <http://e/q1> ?o } WHERE { ?s ?p ?o }",
+  "CONSTRUCT { ?s <http://e/q2> ?o } WHERE { ?s ?p ?o }"
+]'));
+-- => '["<…> <q1> <…> .\n…", "<…> <q2> <…> .\n…"]'
+-- Per-query attribution preserved (i-th element is the i-th query's output).
+-- Pre-flight: any parse error aborts the batch with
+-- "SPARQL parse error (query index N): …" before any query evaluates.
+-- Non-CONSTRUCT queries error with "rdf_construct_many: query index N is not a CONSTRUCT".
 ```
 
 ### Virtual Table

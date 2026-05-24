@@ -179,6 +179,34 @@ operations (so a balanced mixed UPDATE can return `0` even though
 both halves ran). Observe the store with `rdf_count` / `sparql_ask`
 when you need to assert state rather than delta.
 
+### Batched CONSTRUCT (since 0.8.0)
+
+For fixpoint workloads (SHACL Rules, OWL 2 RL reasoning) that
+issue many CONSTRUCTs per iteration, `rdf_construct_many` runs an
+array of CONSTRUCT queries in one FFI crossing and returns a JSON
+array of per-query N-Triples blobs:
+
+```sql
+SELECT rdf_construct_many(
+  json('[
+    "CONSTRUCT { ?p mm:tier mm:VIP }
+       WHERE  { ?p mm:total_orders ?n . FILTER(?n > 100) }",
+    "CONSTRUCT { ?p mm:availability \"in_stock\" }
+       WHERE  { ?p mm:inventory ?n . FILTER(?n > 0) }"
+  ]')
+);
+-- => '["<urn:p:1> <…> <…> .\\n…", "<urn:p:7> <…> <…> .\\n…"]'
+```
+
+Per-query attribution is preserved (the `i`-th element of the
+returned array is the output of the `i`-th input query), so
+consumers can attach `:derivedBy <rule_iri>` annotations rule by
+rule before inserting. CONSTRUCT is read-only — the engine does
+not insert results into the store; the caller decides where each
+blob lands. Pre-flight: any parse error aborts the whole batch
+with the prefix `SPARQL parse error (query index N):` before any
+query evaluates.
+
 ### Bulk Load (Turtle)
 
 ```sql
@@ -374,6 +402,7 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] `sparql_update(query)` for SPARQL 1.1 Update — landed in 0.5.0
 - [x] Graph-scoped bulk loading (`rdf_load_*_to_graph`) — landed in 0.6.0
 - [x] RDF-star / SPARQL-star round-trip — landed in 0.7.0
+- [x] Batched CONSTRUCT (`rdf_construct_many`) — landed in 0.8.0
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails
 - [ ] Persistent store via Oxigraph's RocksDB backend — *deferred,

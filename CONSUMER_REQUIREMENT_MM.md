@@ -177,6 +177,10 @@ required:
 - `rdf_triple_subject(t)` / `rdf_triple_predicate(t)` /
   `rdf_triple_object(t)` (from 0.7.0) — plain-SQL destructors for
   quoted-triple terms. Conformer-adjacent; same status.
+- `rdf_construct_many(queries_json) → TEXT (JSON array)` (from
+  0.8.0) — runs N CONSTRUCTs in one FFI crossing, returns
+  per-query N-Triples blobs. RS driver (`Shacl::Rules.materialise!`
+  fixpoint loop); no MM call site today.
 
 ## Behaviours MM does NOT depend on
 
