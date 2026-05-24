@@ -1,28 +1,32 @@
 /// Scalar functions for managing RDF triples in the thread-local Oxigraph store.
 ///
-/// | SQL Function                        | Description                                      |
-/// |-------------------------------------|--------------------------------------------------|
-/// | `rdf_insert(s, p, o)`               | Insert a triple into the default graph           |
-/// | `rdf_delete(s, p, o)`               | Delete a triple from the default graph           |
-/// | `rdf_clear()`                       | Remove all triples and reset the store           |
-/// | `rdf_count()`                       | Return the number of triples in the store        |
-/// | `rdf_load_turtle(turtle_text)`      | Bulk-load triples from a Turtle-format string    |
-/// | `rdf_load_turtle_to_graph(b, g)`    | …into the named graph `g` (`NULL` → default)     |
-/// | `rdf_load_ntriples(ntriples_text)`  | Bulk-load triples from an N-Triples string       |
-/// | `rdf_load_ntriples_to_graph(b, g)`  | …into the named graph `g` (`NULL` → default)     |
-/// | `rdf_load_rdfxml(xml_text)`         | Bulk-load triples from an RDF/XML string         |
-/// | `rdf_load_rdfxml_to_graph(b, g)`    | …into the named graph `g` (`NULL` → default)     |
-/// | `rdf_dump_ntriples()`               | Dump all triples as an N-Triples string          |
-/// | `rdf_term_type(term)`               | Return "iri", "blank", or "literal"              |
-/// | `rdf_term_value(term)`              | Extract the string value from an N-Triples term  |
+/// | SQL Function                        | Description                                                |
+/// |-------------------------------------|------------------------------------------------------------|
+/// | `rdf_insert(s, p, o)`               | Insert a triple into the default graph                     |
+/// | `rdf_delete(s, p, o)`               | Delete a triple from the default graph                     |
+/// | `rdf_clear()`                       | Remove all triples and reset the store                     |
+/// | `rdf_count()`                       | Return the number of triples in the store                  |
+/// | `rdf_load_turtle(turtle_text)`      | Bulk-load triples from a Turtle-format string              |
+/// | `rdf_load_turtle_to_graph(b, g)`    | …into the named graph `g` (`NULL` → default)               |
+/// | `rdf_load_ntriples(ntriples_text)`  | Bulk-load triples from an N-Triples string                 |
+/// | `rdf_load_ntriples_to_graph(b, g)`  | …into the named graph `g` (`NULL` → default)               |
+/// | `rdf_load_rdfxml(xml_text)`         | Bulk-load triples from an RDF/XML string                   |
+/// | `rdf_load_rdfxml_to_graph(b, g)`    | …into the named graph `g` (`NULL` → default)               |
+/// | `rdf_dump_ntriples()`               | Dump all triples as an N-Triples (-star) string            |
+/// | `rdf_term_type(term)`               | Return "iri", "blank", "literal", or "triple" (0.7.0)      |
+/// | `rdf_term_value(term)`              | Extract the string value from an N-Triples term (refuses triples) |
+/// | `rdf_triple_subject(term)`          | Extract subject of a `<<…>>` quoted-triple term (0.7.0)    |
+/// | `rdf_triple_predicate(term)`        | Extract predicate of a `<<…>>` quoted-triple term (0.7.0)  |
+/// | `rdf_triple_object(term)`           | Extract object of a `<<…>>` quoted-triple term (0.7.0)     |
 use oxigraph::io::{RdfFormat, RdfParser};
+use oxigraph::model::{Term, Triple};
 use sqlite_loadable::{api, define_scalar_function, prelude::*, FunctionFlags};
 
 use crate::error::SparqlError;
 use crate::store::{
     clear_store, delete_triple, delete_triple_in_graph, insert_triple,
-    insert_triple_in_graph, parse_graph_name, triple_count, triple_count_all,
-    triple_count_in_graph, with_store,
+    insert_triple_in_graph, parse_graph_name, parse_term, triple_count,
+    triple_count_all, triple_count_in_graph, with_store,
 };
 use sqlite_loadable::api::ValueType;
 
@@ -234,13 +238,16 @@ pub fn rdf_dump_ntriples_fn(
 
 // ── rdf_term_type ─────────────────────────────────────────────────────────────
 
-/// Returns "iri", "blank", or "literal" for an N-Triples encoded term string.
+/// Returns "iri", "blank", "literal", or "triple" (RDF-star quoted
+/// triple, since 0.7.0) for an N-Triples-encoded term string.
 pub fn rdf_term_type_fn(
     context: *mut sqlite3_context,
     values: &[*mut sqlite3_value],
 ) -> sqlite_loadable::Result<()> {
     let term = api::value_text(values.get(0).expect("term"))?;
-    let kind = if term.starts_with('<') {
+    let kind = if term.starts_with("<<") {
+        "triple"
+    } else if term.starts_with('<') {
         "iri"
     } else if term.starts_with("_:") {
         "blank"
@@ -273,6 +280,12 @@ pub fn rdf_term_value_fn(
 }
 
 fn extract_term_value(term: &str) -> crate::error::Result<String> {
+    if term.starts_with("<<") {
+        return Err(SparqlError::InvalidArgument(format!(
+            "rdf_term_value: triple terms have no scalar value; \
+             use rdf_triple_subject / rdf_triple_predicate / rdf_triple_object: {term}"
+        )));
+    }
     if let Some(iri) = term.strip_prefix('<') {
         Ok(iri.trim_end_matches('>').to_string())
     } else if let Some(id) = term.strip_prefix("_:") {
@@ -288,6 +301,64 @@ fn extract_term_value(term: &str) -> crate::error::Result<String> {
         Err(SparqlError::InvalidArgument(format!(
             "unrecognised term format: {term}"
         )))
+    }
+}
+
+// ── rdf_triple_{subject,predicate,object} ─────────────────────────────────────
+//
+// Destructure an N-Triples-star quoted-triple term from outside SPARQL.
+// Inside SPARQL the SUBJECT/PREDICATE/OBJECT built-ins do the same job;
+// these scalars exist so callers operating in plain SQL (no SPARQL
+// evaluator) can pick a quoted triple apart without parsing the string
+// by hand.
+
+pub fn rdf_triple_subject_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let term = api::value_text(values.get(0).expect("term"))?;
+    let triple = parse_triple_term(term, "rdf_triple_subject")
+        .map_err(sqlite_loadable::Error::from)?;
+    let out = crate::functions::sparql_query::term_to_ntriples_subject(&triple.subject);
+    api::result_text(context, &out)?;
+    Ok(())
+}
+
+pub fn rdf_triple_predicate_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let term = api::value_text(values.get(0).expect("term"))?;
+    let triple = parse_triple_term(term, "rdf_triple_predicate")
+        .map_err(sqlite_loadable::Error::from)?;
+    let out = format!("<{}>", triple.predicate.as_str());
+    api::result_text(context, &out)?;
+    Ok(())
+}
+
+pub fn rdf_triple_object_fn(
+    context: *mut sqlite3_context,
+    values: &[*mut sqlite3_value],
+) -> sqlite_loadable::Result<()> {
+    let term = api::value_text(values.get(0).expect("term"))?;
+    let triple = parse_triple_term(term, "rdf_triple_object")
+        .map_err(sqlite_loadable::Error::from)?;
+    let out = crate::functions::sparql_query::term_to_ntriples(&triple.object);
+    api::result_text(context, &out)?;
+    Ok(())
+}
+
+fn parse_triple_term(term: &str, fn_name: &str) -> crate::error::Result<Triple> {
+    let parsed = parse_term(term).map_err(|e| {
+        SparqlError::InvalidArgument(format!(
+            "{fn_name}: failed to parse term: {e}"
+        ))
+    })?;
+    match parsed {
+        Term::Triple(t) => Ok(*t),
+        _ => Err(SparqlError::InvalidArgument(format!(
+            "{fn_name}: term is not a quoted triple: {term}"
+        ))),
     }
 }
 
@@ -414,6 +485,27 @@ pub fn register(db: *mut sqlite3) -> sqlite_loadable::Result<()> {
         "rdf_term_value",
         1,
         rdf_term_value_fn,
+        FunctionFlags::UTF8 | FunctionFlags::DETERMINISTIC,
+    )?;
+    define_scalar_function(
+        db,
+        "rdf_triple_subject",
+        1,
+        rdf_triple_subject_fn,
+        FunctionFlags::UTF8 | FunctionFlags::DETERMINISTIC,
+    )?;
+    define_scalar_function(
+        db,
+        "rdf_triple_predicate",
+        1,
+        rdf_triple_predicate_fn,
+        FunctionFlags::UTF8 | FunctionFlags::DETERMINISTIC,
+    )?;
+    define_scalar_function(
+        db,
+        "rdf_triple_object",
+        1,
+        rdf_triple_object_fn,
         FunctionFlags::UTF8 | FunctionFlags::DETERMINISTIC,
     )?;
     Ok(())

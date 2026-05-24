@@ -206,8 +206,13 @@ pub fn term_to_ntriples(term: &Term) -> String {
                 format!("\"{}\"^^<{}>", l.value(), l.datatype().as_str())
             }
         }
-        // RDF-star quoted triples are out of scope for 0.1.x.
-        Term::Triple(_) => "\"<<rdf-star unsupported>>\"".to_string(),
+        // N-Triples-star encoding: << s p o >>
+        Term::Triple(t) => format!(
+            "<< {} <{}> {} >>",
+            term_to_ntriples_subject(&t.subject),
+            t.predicate.as_str(),
+            term_to_ntriples(&t.object),
+        ),
     }
 }
 
@@ -215,7 +220,12 @@ pub fn term_to_ntriples_subject(subject: &Subject) -> String {
     match subject {
         Subject::NamedNode(n) => format!("<{}>", n.as_str()),
         Subject::BlankNode(b) => format!("_:{}", b.as_str()),
-        Subject::Triple(_) => "\"<<rdf-star unsupported>>\"".to_string(),
+        Subject::Triple(t) => format!(
+            "<< {} <{}> {} >>",
+            term_to_ntriples_subject(&t.subject),
+            t.predicate.as_str(),
+            term_to_ntriples(&t.object),
+        ),
     }
 }
 

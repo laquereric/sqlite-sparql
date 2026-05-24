@@ -14,6 +14,7 @@
 //! `docs/reviews/REVIEW_0.1.0.md` and `docs/plans/PLAN_0.2.0.md` for
 //! the reasoning.
 
+use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::*;
 use oxigraph::store::Store;
 use std::sync::OnceLock;
@@ -153,10 +154,16 @@ pub(crate) fn parse_graph_name(graph: Option<&str>) -> crate::error::Result<Grap
 
 // ── Parsing helpers ──────────────────────────────────────────────────────────
 
-/// Parse a string as a NamedNode (IRI) or BlankNode.
+/// Parse a string as a NamedNode (IRI), BlankNode, or quoted Triple
+/// (RDF-star, since 0.7.0).
 ///
-/// Blank nodes must be prefixed with `_:` (e.g. `_:b0`).
+/// Blank nodes must be prefixed with `_:` (e.g. `_:b0`). Quoted
+/// triples follow the N-Triples-star form `<< <s> <p> <o> >>` and
+/// may nest. Anything else is parsed as a bare IRI.
 pub(crate) fn parse_named_or_blank(s: &str) -> crate::error::Result<Subject> {
+    if s.starts_with("<<") {
+        return Ok(Subject::Triple(Box::new(parse_quoted_triple(s)?)));
+    }
     if let Some(id) = s.strip_prefix("_:") {
         Ok(Subject::BlankNode(BlankNode::new(id).map_err(|e| {
             crate::error::SparqlError::InvalidArgument(format!("blank node id: {e}"))
@@ -171,10 +178,15 @@ pub(crate) fn parse_named_or_blank(s: &str) -> crate::error::Result<Subject> {
 /// Parse an RDF term (object position).
 ///
 /// Rules:
-/// - `_:xxx`  → BlankNode
+/// - `<<…>>` → quoted Triple (RDF-star, since 0.7.0)
+/// - `_:xxx` → BlankNode
 /// - `"text"` or `"text"^^<iri>` or `"text"@lang` → Literal
 /// - anything else → NamedNode (IRI)
 pub(crate) fn parse_term(s: &str) -> crate::error::Result<Term> {
+    if s.starts_with("<<") {
+        return Ok(Term::Triple(Box::new(parse_quoted_triple(s)?)));
+    }
+
     if let Some(id) = s.strip_prefix("_:") {
         return Ok(Term::BlankNode(BlankNode::new(id).map_err(|e| {
             crate::error::SparqlError::InvalidArgument(format!("blank node id: {e}"))
@@ -188,6 +200,40 @@ pub(crate) fn parse_term(s: &str) -> crate::error::Result<Term> {
     Ok(Term::NamedNode(NamedNode::new(s).map_err(|e| {
         crate::error::SparqlError::InvalidArgument(format!("object IRI: {e}"))
     })?))
+}
+
+/// Parse an N-Triples-star quoted-triple term (`<< <s> <p> <o> >>`)
+/// by synthesising a complete N-Triples-star line that places the
+/// term in subject position, feeding it through Oxigraph's
+/// N-Triples-star parser, and extracting the parsed Triple from the
+/// resulting Quad's subject. The sentinel predicate/object IRIs are
+/// arbitrary — we discard everything but the subject. Nesting falls
+/// out for free: the canonical parser handles `<< << s p o >> p o >>`
+/// to whatever depth the engine supports.
+fn parse_quoted_triple(s: &str) -> crate::error::Result<Triple> {
+    let synth = format!(
+        "{s} <urn:sqlite-sparql:sentinel/p> <urn:sqlite-sparql:sentinel/o> .\n"
+    );
+    let parser = RdfParser::from_format(RdfFormat::NTriples);
+    let mut iter = parser.for_reader(synth.as_bytes());
+    let quad = iter
+        .next()
+        .ok_or_else(|| {
+            crate::error::SparqlError::InvalidArgument(format!(
+                "expected quoted triple term, parser produced nothing: {s}"
+            ))
+        })?
+        .map_err(|e| {
+            crate::error::SparqlError::InvalidArgument(format!(
+                "malformed quoted triple {s}: {e}"
+            ))
+        })?;
+    match quad.subject {
+        Subject::Triple(t) => Ok(*t),
+        _ => Err(crate::error::SparqlError::InvalidArgument(format!(
+            "expected quoted triple, got plain term: {s}"
+        ))),
+    }
 }
 
 /// Parse a quoted literal string in N-Triples / Turtle syntax.

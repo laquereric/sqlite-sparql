@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.7.0 — RDF-star / SPARQL-star round-trip
+
+Quoted-triple terms now survive the SQL boundary in both directions.
+Before 0.7.0, the term serialiser in `src/functions/sparql_query.rs`
+stubbed every `Term::Triple` / `Subject::Triple` to the literal string
+`"<<rdf-star unsupported>>"`, and the term parser in `src/store.rs`
+rejected any `<<…>>` input as a malformed IRI. The engine side
+(Oxigraph 0.4) already parsed Turtle-star / N-Triples-star and
+evaluated SPARQL-star — only the SQL boundary lost information.
+
+Surface delta:
+
+- **Write paths** — `rdf_insert(s, p, o[, g])`, `rdf_delete(s, p, o[, g])`,
+  `rdf_insert_many`, `rdf_delete_many`, and the `rdf_triples` vtab all
+  accept `<< <s> <p> <o> >>` in subject and object position. Predicate
+  position stays IRI-only (RDF doesn't extend star to predicates).
+- **Read paths** — `rdf_dump_ntriples`, `sparql_construct`, the JSON
+  bindings from `sparql_query`, and `SELECT` over the `rdf_triples`
+  vtab all emit `<< s p o >>` for quoted-triple terms. Nesting
+  (`<< << s p o >> p o >>`) round-trips.
+- **SPARQL-star** flows straight through to Oxigraph — annotation
+  shorthand `{| |}`, explicit `<<>>` patterns, and the
+  `TRIPLE` / `SUBJECT` / `PREDICATE` / `OBJECT` / `isTRIPLE` built-ins
+  all work without SQL-side wrapping.
+- **New scalars** (additive — every 0.6.x call works unchanged):
+  - `rdf_triple_subject(term) → TEXT` — extract subject of a quoted triple.
+  - `rdf_triple_predicate(term) → TEXT` — extract predicate.
+  - `rdf_triple_object(term) → TEXT` — extract object.
+
+Behaviour changes (call out for consumers):
+
+- `rdf_term_type(term)` now returns `"triple"` for a `<<…>>` string
+  (previously `"unknown"`).
+- `rdf_term_value(term)` on a `<<…>>` string now raises a SQLite
+  error with the fixed-prefix message
+  `rdf_term_value: triple terms have no scalar value; use
+  rdf_triple_subject / rdf_triple_predicate / rdf_triple_object: …`
+  Previously raised `unrecognised term format: …`. Prefix-matching
+  consumers (none known) must update.
+
+Driver: the MM Conformer subagent in vv-memory's Silver tier — see
+`docs/research/StarExts.md` §6. Neither `CONSUMER_REQUIREMENT_MM.md`
+nor `CONSUMER_REQUIREMENT_RS.md` calls the new surface yet; both
+list it in their "Available upstream but not exercised" sections so
+the paper trail is in place when consumers adopt.
+
+RocksDB persistence (penciled in for 0.7.0 by earlier roadmaps) is
+deferred indefinitely — no consumer pressure. Revive on first ask.
+
 ## 0.6.0 — Graph-scoped bulk loading
 
 Closes the last named-graph gap on the SQL surface. Until 0.6.0 the

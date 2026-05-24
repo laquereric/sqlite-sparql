@@ -1091,4 +1091,383 @@ mod tests {
         );
         Ok(())
     }
+
+    // ── 0.7.0 RDF-star / SPARQL-star ──────────────────────────────────────────
+    //
+    // Quoted-triple terms survive the SQL boundary in both directions: parsed
+    // in by every write path (rdf_insert, rdf_insert_many, the rdf_triples
+    // vtab, rdf_load_*), emitted out by every read path (rdf_dump_ntriples,
+    // sparql_query JSON bindings, sparql_construct). Inverts the Phase A
+    // negative pins documented in PLAN_0.7.0.md.
+
+    /// Test 1 — Turtle-star body with `{| |}` annotation expands to one
+    /// asserted triple + N annotation triples. Pins the Oxigraph 0.4 parser
+    /// row in the plan's "What works today" table.
+    #[test]
+    #[serial]
+    fn test_rdf_star_load_turtle_with_annotation() -> Result<()> {
+        let conn = open_with_extension()?;
+        let turtle = r#"
+            @prefix : <http://example.org/> .
+            :bob :name "Bob" {| :statedBy :alice ; :confidence "0.9" |} .
+        "#;
+        let loaded: i64 =
+            conn.query_row("SELECT rdf_load_turtle(?)", [turtle], |r| r.get(0))?;
+        assert_eq!(loaded, 3, "1 asserted + 2 annotation triples");
+        let total: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(total, 3);
+        Ok(())
+    }
+
+    /// Test 2 — `rdf_dump_ntriples` emits valid N-Triples-star (no more stub
+    /// literal) and the output round-trips back through `rdf_load_ntriples`.
+    #[test]
+    #[serial]
+    fn test_rdf_star_dump_roundtrip() -> Result<()> {
+        let conn = open_with_extension()?;
+        let turtle = r#"
+            @prefix : <http://example.org/> .
+            :bob :name "Bob" {| :statedBy :alice |} .
+        "#;
+        let _: i64 =
+            conn.query_row("SELECT rdf_load_turtle(?)", [turtle], |r| r.get(0))?;
+        let dump: String =
+            conn.query_row("SELECT rdf_dump_ntriples()", [], |r| r.get(0))?;
+
+        assert!(
+            dump.contains("<<") && dump.contains(">>"),
+            "Dump must use N-Triples-star <<…>> form; got: {dump}"
+        );
+        assert!(
+            !dump.contains("rdf-star unsupported"),
+            "Phase B stub literal must not appear; got: {dump}"
+        );
+
+        // Round-trip: clear, re-load the dump, count should match.
+        conn.execute_batch("SELECT rdf_clear();")?;
+        let reloaded: i64 = conn
+            .query_row("SELECT rdf_load_ntriples(?)", [&dump], |r| r.get(0))?;
+        assert_eq!(reloaded, 2, "dump should re-parse to the same 2 quads");
+        let total: i64 = conn.query_row("SELECT rdf_count_all()", [], |r| r.get(0))?;
+        assert_eq!(total, 2);
+        Ok(())
+    }
+
+    /// Test 3 — `rdf_insert` accepts a quoted-triple subject (Phase C parser).
+    #[test]
+    #[serial]
+    fn test_rdf_star_insert_quoted_subject_via_rdf_insert() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            r#"SELECT rdf_insert(
+                 '<< <http://e/a> <http://e/p> "x" >>',
+                 'http://e/q',
+                 'http://e/b'
+               );"#,
+        )?;
+        let count: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(count, 1);
+        let dump: String =
+            conn.query_row("SELECT rdf_dump_ntriples()", [], |r| r.get(0))?;
+        assert!(
+            dump.contains("<< <http://e/a> <http://e/p> \"x\" >>"),
+            "dump should contain the inserted quoted-triple subject; got: {dump}"
+        );
+        Ok(())
+    }
+
+    /// Test 4 — `rdf_insert` accepts a quoted-triple object.
+    #[test]
+    #[serial]
+    fn test_rdf_star_insert_quoted_object_via_rdf_insert() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            r#"SELECT rdf_insert(
+                 'http://e/a',
+                 'http://e/p',
+                 '<< <http://e/x> <http://e/y> "z" >>'
+               );"#,
+        )?;
+        let count: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(count, 1);
+        let dump: String =
+            conn.query_row("SELECT rdf_dump_ntriples()", [], |r| r.get(0))?;
+        assert!(
+            dump.contains("<< <http://e/x> <http://e/y> \"z\" >>"),
+            "dump should contain the inserted quoted-triple object; got: {dump}"
+        );
+        Ok(())
+    }
+
+    /// Test 5 — the `rdf_triples` virtual table accepts quoted-triple subjects
+    /// in `INSERT VALUES` and emits them back in `SELECT`.
+    #[test]
+    #[serial]
+    fn test_rdf_star_vtab_insert_and_select() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch("CREATE VIRTUAL TABLE triples USING rdf_triples();")?;
+        conn.execute_batch(
+            r#"INSERT INTO triples VALUES (
+                 '<< <http://e/a> <http://e/p> "x" >>',
+                 'http://e/q',
+                 '"y"'
+               );"#,
+        )?;
+        let subject: String =
+            conn.query_row("SELECT subject FROM triples LIMIT 1", [], |r| r.get(0))?;
+        assert_eq!(
+            subject, "<< <http://e/a> <http://e/p> \"x\" >>",
+            "vtab SELECT must round-trip the quoted-triple subject"
+        );
+        Ok(())
+    }
+
+    /// Test 6 — SPARQL-star annotation shorthand binds bare variables in the
+    /// asserted + annotation patterns.
+    #[test]
+    #[serial]
+    fn test_rdf_star_sparql_query_annotation_shorthand() -> Result<()> {
+        let conn = open_with_extension()?;
+        let turtle = r#"
+            @prefix : <http://example.org/> .
+            :bob :name "Bob" {| :statedBy :alice |} .
+        "#;
+        let _: i64 =
+            conn.query_row("SELECT rdf_load_turtle(?)", [turtle], |r| r.get(0))?;
+
+        let json: String = conn.query_row(
+            "SELECT sparql_query(?)",
+            [r#"
+                PREFIX : <http://example.org/>
+                SELECT ?val ?stater WHERE {
+                  :bob :name ?val {| :statedBy ?stater |} .
+                }
+            "#],
+            |r| r.get(0),
+        )?;
+        assert!(json.contains("Bob"), "expected ?val = Bob; got: {json}");
+        assert!(json.contains("alice"), "expected ?stater = alice; got: {json}");
+        Ok(())
+    }
+
+    /// Test 7 — a SPARQL-star query that binds `?t` to a quoted-triple term
+    /// returns the N-Triples-star encoding in the JSON envelope (the Phase B
+    /// serialiser output is exercised here).
+    #[test]
+    #[serial]
+    fn test_rdf_star_sparql_query_triple_term_binding() -> Result<()> {
+        let conn = open_with_extension()?;
+        let turtle = r#"
+            @prefix : <http://example.org/> .
+            :bob :name "Bob" {| :statedBy :alice |} .
+        "#;
+        let _: i64 =
+            conn.query_row("SELECT rdf_load_turtle(?)", [turtle], |r| r.get(0))?;
+
+        let json: String = conn.query_row(
+            "SELECT sparql_query(?)",
+            [r#"
+                PREFIX : <http://example.org/>
+                SELECT ?t ?stater WHERE { ?t :statedBy ?stater . }
+            "#],
+            |r| r.get(0),
+        )?;
+        assert!(
+            !json.contains("rdf-star unsupported"),
+            "stub literal must not appear in triple-term binding; got: {json}"
+        );
+        assert!(json.contains("<<"), "binding should contain <<; got: {json}");
+        assert!(json.contains(">>"), "binding should contain >>; got: {json}");
+        assert!(json.contains("bob"), "binding should reference bob; got: {json}");
+        assert!(json.contains("name"), "binding should reference name; got: {json}");
+        Ok(())
+    }
+
+    /// Test 8 — `sparql_construct` over a star pattern emits N-Triples-star
+    /// that re-parses through `rdf_load_ntriples`.
+    #[test]
+    #[serial]
+    fn test_rdf_star_sparql_construct() -> Result<()> {
+        let conn = open_with_extension()?;
+        let turtle = r#"
+            @prefix : <http://example.org/> .
+            :bob :name "Bob" {| :statedBy :alice |} .
+        "#;
+        let _: i64 =
+            conn.query_row("SELECT rdf_load_turtle(?)", [turtle], |r| r.get(0))?;
+
+        let constructed: String = conn.query_row(
+            "SELECT sparql_construct(?)",
+            [r#"
+                PREFIX : <http://example.org/>
+                CONSTRUCT { ?t :wasStatedBy ?stater }
+                WHERE { ?t :statedBy ?stater }
+            "#],
+            |r| r.get(0),
+        )?;
+        assert!(
+            constructed.contains("<<") && constructed.contains(">>"),
+            "CONSTRUCT result should contain a quoted-triple subject; got: {constructed}"
+        );
+        assert!(
+            constructed.contains("wasStatedBy"),
+            "CONSTRUCT result should contain the new predicate; got: {constructed}"
+        );
+
+        // Round-trip: load the CONSTRUCT output into a clean store.
+        conn.execute_batch("SELECT rdf_clear();")?;
+        let reloaded: i64 = conn
+            .query_row("SELECT rdf_load_ntriples(?)", [&constructed], |r| r.get(0))?;
+        assert_eq!(reloaded, 1, "CONSTRUCT output should round-trip as 1 quad");
+        Ok(())
+    }
+
+    /// Test 9 — the SPARQL-star `TRIPLE(...)` constructor built-in.
+    #[test]
+    #[serial]
+    fn test_rdf_star_builtin_triple() -> Result<()> {
+        let conn = open_with_extension()?;
+        let json: String = conn.query_row(
+            "SELECT sparql_query(?)",
+            [r#"
+                SELECT ?t WHERE {
+                  BIND(TRIPLE(<http://e/s>, <http://e/p>, <http://e/o>) AS ?t)
+                }
+            "#],
+            |r| r.get(0),
+        )?;
+        assert!(
+            json.contains("<< <http://e/s> <http://e/p> <http://e/o> >>"),
+            "TRIPLE built-in should produce a quoted-triple binding; got: {json}"
+        );
+        Ok(())
+    }
+
+    /// Test 10 — the four SPARQL-star destructor / predicate built-ins on a
+    /// single bound triple term.
+    #[test]
+    #[serial]
+    fn test_rdf_star_builtin_subject_predicate_object_istriple() -> Result<()> {
+        let conn = open_with_extension()?;
+        let json: String = conn.query_row(
+            "SELECT sparql_query(?)",
+            [r#"
+                SELECT ?s ?p ?o ?is WHERE {
+                  BIND(TRIPLE(<http://e/s>, <http://e/p>, <http://e/o>) AS ?t)
+                  BIND(SUBJECT(?t)    AS ?s)
+                  BIND(PREDICATE(?t)  AS ?p)
+                  BIND(OBJECT(?t)     AS ?o)
+                  BIND(isTRIPLE(?t)   AS ?is)
+                }
+            "#],
+            |r| r.get(0),
+        )?;
+        assert!(json.contains("<http://e/s>"), "SUBJECT binding; got: {json}");
+        assert!(json.contains("<http://e/p>"), "PREDICATE binding; got: {json}");
+        assert!(json.contains("<http://e/o>"), "OBJECT binding; got: {json}");
+        assert!(json.contains("true"), "isTRIPLE should be true; got: {json}");
+        Ok(())
+    }
+
+    /// Test 11 — `rdf_term_type` classifies a quoted-triple string as `triple`.
+    #[test]
+    #[serial]
+    fn test_rdf_term_type_triple() -> Result<()> {
+        let conn = open_with_extension()?;
+        let kind: String = conn.query_row(
+            "SELECT rdf_term_type('<< <http://e/a> <http://e/p> <http://e/b> >>')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(kind, "triple");
+        Ok(())
+    }
+
+    /// Test 12 — the three `rdf_triple_*` destructor scalars.
+    #[test]
+    #[serial]
+    fn test_rdf_triple_subject_predicate_object_scalars() -> Result<()> {
+        let conn = open_with_extension()?;
+        let term = "<< <http://e/a> <http://e/p> \"x\" >>";
+        let s: String = conn.query_row(
+            "SELECT rdf_triple_subject(?)",
+            [term],
+            |r| r.get(0),
+        )?;
+        let p: String = conn.query_row(
+            "SELECT rdf_triple_predicate(?)",
+            [term],
+            |r| r.get(0),
+        )?;
+        let o: String = conn.query_row(
+            "SELECT rdf_triple_object(?)",
+            [term],
+            |r| r.get(0),
+        )?;
+        assert_eq!(s, "<http://e/a>");
+        assert_eq!(p, "<http://e/p>");
+        assert_eq!(o, "\"x\"");
+        Ok(())
+    }
+
+    /// Test 13 — `rdf_term_value` refuses a triple term with the fixed-prefix
+    /// error envelope consuming gems prefix-match.
+    #[test]
+    #[serial]
+    fn test_rdf_term_value_refuses_triple() -> Result<()> {
+        let conn = open_with_extension()?;
+        let err = conn
+            .query_row::<String, _, _>(
+                "SELECT rdf_term_value('<< <http://e/a> <http://e/p> <http://e/b> >>')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("rdf_term_value: triple terms have no scalar value"),
+            "refusal must carry the fixed-prefix message; got: {err}"
+        );
+        Ok(())
+    }
+
+    /// Test 14 — nested quoted triples (`<< << s p o >> p o >>`) round-trip
+    /// through both the parser and the serialiser.
+    #[test]
+    #[serial]
+    fn test_rdf_star_nested_triple_roundtrip() -> Result<()> {
+        let conn = open_with_extension()?;
+        let nested =
+            "<< << <http://e/a> <http://e/p> <http://e/b> >> <http://e/q> <http://e/c> >>";
+        conn.execute_batch(&format!(
+            "SELECT rdf_insert('{nested}', 'http://e/r', 'http://e/d');"
+        ))?;
+        let dump: String =
+            conn.query_row("SELECT rdf_dump_ntriples()", [], |r| r.get(0))?;
+        // Two `<<` opens: one for outer, one for nested inner.
+        assert_eq!(
+            dump.matches("<<").count(),
+            2,
+            "dump should contain two nested `<<` opens; got: {dump}"
+        );
+        assert!(
+            dump.contains(nested),
+            "dump should contain the original nested term verbatim; got: {dump}"
+        );
+
+        // Verify the nested term re-parses via rdf_triple_subject (which
+        // exercises the Phase C parser end-to-end on the outer term, and
+        // the Phase B serialiser on the inner triple).
+        let inner: String = conn.query_row(
+            "SELECT rdf_triple_subject(?)",
+            [nested],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            inner,
+            "<< <http://e/a> <http://e/p> <http://e/b> >>",
+            "rdf_triple_subject on nested term should return the inner quoted triple"
+        );
+        Ok(())
+    }
 }

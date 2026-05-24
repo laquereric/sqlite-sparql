@@ -171,9 +171,10 @@ roadmap looks like:
 | 0.4.0 | Batched insert (`rdf_insert_many` / `rdf_delete_many`) | `PLAN_0.4.0.md` |
 | 0.5.0 | SPARQL UPDATE — `sparql_update(query)` | `PLAN_0.5.0.md` |
 | 0.6.0 | Graph-scoped bulk loading (`rdf_load_*_to_graph`) | `PLAN_0.6.0.md` |
-| 0.7.0 | Persistent RocksDB backend via `rdf_open(path)` | (future) |
+| 0.7.0 | RDF-star / SPARQL-star round-trip | `PLAN_0.7.0.md` |
 | 0.8.0 | `sqlite-sparql-ruby` gem wrapper | (future) |
 | 0.9.0 | SPARQL HTTP endpoint | (future) |
+| Deferred | Persistent RocksDB backend via `rdf_open(path)` | revive on first consumer ask |
 
 Do not edit `CHANGELOG.md`'s historical 0.1.0 entry — its
 future-roadmap mentions were accurate *as of the 0.1.0 release* and

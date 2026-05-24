@@ -165,6 +165,18 @@ required:
 - `rdf_dump_ntriples()` — MM doesn't dump.
 - `rdf_term_type` / `rdf_term_value` — MM hands string-typed values
   to the gem, which doesn't need these helpers.
+- **RDF-star / SPARQL-star round-trip (from 0.7.0)** — quoted-triple
+  terms (`<< <s> <p> <o> >>`) survive every read/write path; SPARQL-star
+  syntax (annotation shorthand `{| |}`, explicit `<<>>` patterns,
+  `TRIPLE` / `SUBJECT` / `PREDICATE` / `OBJECT` / `isTRIPLE` built-ins)
+  flows straight through to Oxigraph. The MM vv-memory Silver
+  Conformer is the intended consumer — see
+  `docs/research/StarExts.md` §6 — but no MM code calls it today.
+  Will graduate to "SQL surfaces MM consumes" when the Conformer
+  PLAN pins the gem-level facade.
+- `rdf_triple_subject(t)` / `rdf_triple_predicate(t)` /
+  `rdf_triple_object(t)` (from 0.7.0) — plain-SQL destructors for
+  quoted-triple terms. Conformer-adjacent; same status.
 
 ## Behaviours MM does NOT depend on
 

@@ -185,12 +185,19 @@ Free to evolve without coordination:
   initialised."
 - **Internal sqlite-loadable API churn** — as long as the SQL
   surface above holds, RS doesn't care what's under it.
-- **Persistence backend** (in-memory today; RocksDB someday) — RS
-  is store-agnostic. If a future engine release defaults to
-  per-process persistence or per-file persistence, that's
-  observable to RS only as "store contents persist across
-  process restarts" — which RS handles fine (the sentinel + Loader
+- **Persistence backend** (in-memory today; deferred indefinitely as
+  of 0.7.0) — RS is store-agnostic. If a future engine release
+  defaults to per-process persistence or per-file persistence, that's
+  observable to RS only as "store contents persist across process
+  restarts" — which RS handles fine (the sentinel + Loader
   idempotency already cover this case).
+- **RDF-star / SPARQL-star round-trip (available from 0.7.0)** —
+  quoted-triple terms (`<< s p o >>`) round-trip through every read
+  and write path; SPARQL-star syntax flows straight through to
+  Oxigraph; new `rdf_triple_subject` / `_predicate` / `_object`
+  scalars destructure terms in plain SQL. RS does not exercise any
+  of this today. See `docs/research/StarExts.md` for the substrate
+  driver (MM vv-memory Conformer).
 
 ## Drift signals
 

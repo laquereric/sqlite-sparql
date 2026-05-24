@@ -235,6 +235,84 @@ All subject, predicate, and object arguments use N-Triples encoding:
 | Plain literal | `"value"` | `"Hello"` |
 | Language literal | `"value"@lang` | `"Bonjour"@fr` |
 | Typed literal | `"value"^^<datatype>` | `"42"^^<http://www.w3.org/2001/XMLSchema#integer>` |
+| Quoted triple (RDF-star, since 0.7.0) | `<< <s> <p> <o> >>` | `<< <http://e/bob> <http://e/name> "Bob" >>` |
+
+> **Caveat for `rdf_insert`/`rdf_delete`/the vtab:** subject and object
+> positions take a *bare* IRI (no angle brackets) — `'http://e/alice'`,
+> not `'<http://e/alice>'`. Angle brackets only appear *inside* a
+> quoted-triple term (`'<< <http://e/a> <http://e/p> "x" >>'`). The
+> dump and SPARQL-result outputs use full N-Triples encoding (with
+> brackets).
+
+---
+
+## RDF-star / SPARQL-star
+
+Quoted-triple terms (the RDF-star
+[CG report](https://w3c-cg.github.io/rdf-star/cg-spec/2021-12-17.html))
+round-trip through every read and write path since 0.7.0. The
+substrate is Oxigraph 0.4, which already accepts Turtle-star /
+N-Triples-star input and evaluates SPARQL-star — the SQL surface
+just stopped throwing the terms away.
+
+```sql
+-- Load a Turtle-star body with annotation shorthand
+SELECT rdf_load_turtle('
+  @prefix : <http://example.org/> .
+  :bob :name "Bob" {| :statedBy :alice ; :confidence "0.9" |} .
+');
+-- → 3 (one asserted triple + two annotation triples)
+
+-- Insert a quoted triple as subject
+SELECT rdf_insert(
+  '<< <http://e/bob> <http://e/name> "Bob" >>',
+  'http://e/statedBy',
+  'http://e/alice'
+);
+
+-- Query it with SPARQL-star
+SELECT sparql_query('
+  PREFIX : <http://example.org/>
+  SELECT ?val ?stater WHERE {
+    :bob :name ?val {| :statedBy ?stater |} .
+  }
+');
+
+-- Destructure a quoted-triple term in plain SQL
+SELECT rdf_triple_subject('<< <http://e/a> <http://e/p> "x" >>');
+-- → '<http://e/a>'
+SELECT rdf_term_type('<< <a> <b> <c> >>');
+-- → 'triple'
+```
+
+Surface delta from 0.6.x:
+
+- **All write paths** (`rdf_insert`, `rdf_delete`, `rdf_insert_many`,
+  `rdf_delete_many`, `rdf_triples` vtab `INSERT`) accept `<< s p o >>`
+  in subject and object position. Predicate position stays
+  IRI-only — RDF doesn't extend star to predicates.
+- **All read paths** (`rdf_dump_ntriples`, `sparql_construct`,
+  `sparql_query` JSON bindings, `rdf_triples` vtab `SELECT`) emit
+  `<< s p o >>` for quoted-triple terms.
+- **SPARQL-star** flows straight through to Oxigraph — annotation
+  shorthand `{| |}`, explicit `<<>>` patterns, and the
+  `TRIPLE` / `SUBJECT` / `PREDICATE` / `OBJECT` / `isTRIPLE`
+  built-ins all work without any SQL-side wrapping.
+- New helper scalars (since 0.7.0):
+  - `rdf_term_type(term)` returns `"triple"` for a quoted triple.
+  - `rdf_triple_subject(term)` / `rdf_triple_predicate(term)` /
+    `rdf_triple_object(term)` extract the parts of a quoted triple
+    in plain SQL. (Inside SPARQL, use the `SUBJECT` / `PREDICATE` /
+    `OBJECT` built-ins.)
+  - `rdf_term_value(term)` on a quoted triple raises an error with
+    the prefix `rdf_term_value: triple terms have no scalar value`
+    — quoted triples have three parts, not one scalar value.
+
+Nesting (`<< << s p o >> p o >>`) round-trips through every path.
+
+For background on why this matters (statement-about-statement
+provenance, the Conformer pattern), see
+`docs/research/StarExts.md`.
 
 ---
 
@@ -278,8 +356,6 @@ wraps it in `OnceLock` only for lazy initialisation.
   boot or first access.
 - **Blank-node graphs are rejected.** Oxigraph supports them; we keep
   the boundary narrow. Use IRI-named graphs.
-- **RDF 1.1 only.** RDF-star quoted triples are rejected with a clear
-  error.
 - **`LOAD <iri>` inside `sparql_update`** would make Oxigraph fetch
   the IRI over HTTP from inside the database. The default Oxigraph
   build has no HTTP support, so `LOAD` returns an evaluation error.
@@ -296,10 +372,12 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] Batched insert (`rdf_insert_many` / `rdf_delete_many`) — landed
       in 0.4.0
 - [x] `sparql_update(query)` for SPARQL 1.1 Update — landed in 0.5.0
-- [ ] Persistent store via Oxigraph's RocksDB backend
-- [ ] `rdf_open(path)` to attach a persistent store
+- [x] Graph-scoped bulk loading (`rdf_load_*_to_graph`) — landed in 0.6.0
+- [x] RDF-star / SPARQL-star round-trip — landed in 0.7.0
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails
+- [ ] Persistent store via Oxigraph's RocksDB backend — *deferred,
+      no consumer pressure; revive on first ask*
 
 ---
 

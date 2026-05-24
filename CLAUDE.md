@@ -117,18 +117,29 @@ first-class affected-row count; the delta is the honest summary for
 single-direction updates and `inserts - deletes` for mixed modifies).
 See `docs/plans/PLAN_0.5.0.md`.
 
-### 4. Persistent Store (RocksDB backend)
-For production use, replace the in-memory `Store::new()` in `store.rs` with
-`Store::open(path)` (Oxigraph's RocksDB-backed persistent store). Expose the
-path via a `rdf_open(path TEXT)` SQL function or an extension argument.
+### 4. RDF-star / SPARQL-star — DONE in 0.7.0
+Quoted-triple terms (`<< s p o >>`) round-trip through every read and
+write path. The parser side (Turtle-star / N-Triples-star) and the
+SPARQL-star evaluator were already provided by Oxigraph 0.4; 0.7.0
+extends the SQL boundary to encode/decode the terms instead of
+stubbing them. New scalars: `rdf_triple_subject`, `rdf_triple_predicate`,
+`rdf_triple_object`. `rdf_term_type` returns `"triple"`. See
+`docs/plans/PLAN_0.7.0.md` and `docs/research/StarExts.md`.
 
-### 5. Rails Gem Wrapper (`sqlite-sparql-ruby`)
+### 5. Persistent Store (RocksDB backend) — DEFERRED
+No consumer asks for persistence. If it lands, replace the in-memory
+`Store::new()` in `store.rs` with `Store::open(path)` (Oxigraph's
+RocksDB-backed persistent store) and expose the path via a
+`rdf_open(path TEXT)` SQL function or an extension argument. Revive
+on first consumer ask.
+
+### 6. Rails Gem Wrapper (`sqlite-sparql-ruby`)
 Create a companion Ruby gem that:
 - Ships the pre-compiled `.dylib`/`.so` for common platforms
 - Exposes a `SqliteSparql.load(db)` method (mirroring `sqlite-vec`'s pattern)
 - Provides an ActiveRecord concern `HasRdfTriples` for model-level helpers
 
-### 6. SPARQL Endpoint Middleware
+### 7. SPARQL Endpoint Middleware
 Add a Rack/Rails middleware that exposes a `/sparql` HTTP endpoint accepting
 SPARQL queries over the wire (SPARQL Protocol 1.1).
 
@@ -158,8 +169,18 @@ SELECT rdf_dump_ntriples();                      -- returns TEXT
 SELECT rdf_term_type('<http://example.org/>');   -- 'iri'
 SELECT rdf_term_type('_:b0');                    -- 'blank'
 SELECT rdf_term_type('"hello"');                 -- 'literal'
+SELECT rdf_term_type('<< <a> <b> <c> >>');       -- 'triple'  (0.7.0)
 SELECT rdf_term_value('<http://example.org/>');  -- 'http://example.org/'
 SELECT rdf_term_value('"hello"@en');             -- 'hello'
+-- rdf_term_value on a triple term raises a fixed-prefix error
+-- ('rdf_term_value: triple terms have no scalar value; …') so
+-- callers can prefix-match for refusal envelopes.
+
+-- 0.7.0: destructure a quoted-triple term in plain SQL
+SELECT rdf_triple_subject('<< <http://e/a> <http://e/p> "x" >>');   -- '<http://e/a>'
+SELECT rdf_triple_predicate('<< <http://e/a> <http://e/p> "x" >>'); -- '<http://e/p>'
+SELECT rdf_triple_object('<< <http://e/a> <http://e/p> "x" >>');    -- '"x"'
+-- Inside SPARQL, prefer the SUBJECT / PREDICATE / OBJECT built-ins.
 ```
 
 ### SPARQL Querying
@@ -244,6 +265,16 @@ cargo test -- --nocapture
 # Single test
 cargo test test_sparql_select -- --nocapture
 ```
+
+> **Footgun — release-mode tests don't rebuild the cdylib.** Integration
+> tests load the compiled `.dylib` via the `SQLITE_SPARQL_CDYLIB` env
+> var that `build.rs` sets to `target/{debug,release}/libsqlite_sparql.dylib`.
+> The integration test crate depends on the *path*, not on the cdylib
+> as a build artifact — so `cargo test --release` will happily reuse a
+> stale release dylib from a previous build and produce ghost failures
+> (e.g. tests asserting new behaviour against the old binary). Always
+> run `cargo build --release` first, or invalidate `target/release/`,
+> before `cargo test --release`.
 
 ---
 
