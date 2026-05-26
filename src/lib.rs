@@ -58,6 +58,7 @@
 
 use sqlite_loadable::prelude::*;
 
+pub mod dependency_index;
 pub mod error;
 pub mod functions;
 pub mod store;
@@ -83,6 +84,9 @@ pub fn sqlite3_sqlitesparql_init(db: *mut sqlite3) -> sqlite_loadable::Result<()
 
     // Register native SHACL Core validator (rdf_shacl_core_validate)
     functions::rdf_shacl_core::register(db)?;
+
+    // Register native DRed over-deletion (rdf_dred_overdelete)
+    functions::rdf_dred::register(db)?;
 
     // Register the rdf_triples virtual table module
     vtab::triples_vtab::register(db)?;

@@ -36,8 +36,11 @@ where
 }
 
 /// Remove every quad from the store. The store instance itself stays
-/// alive; future inserts go to the same `Store` object.
+/// alive; future inserts go to the same `Store` object. Also clears
+/// the dependency index (0.12.0) — otherwise a later
+/// `rdf_dred_overdelete` would reference stale quad keys.
 pub fn clear_store() -> crate::error::Result<()> {
+    crate::dependency_index::clear_index();
     store()
         .clear()
         .map_err(|e| crate::error::SparqlError::StoreError(e.to_string()))

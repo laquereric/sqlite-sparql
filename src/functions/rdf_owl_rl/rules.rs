@@ -148,73 +148,91 @@ const DT_TYPE1_DATATYPES: &[&str] = &[
 pub(crate) struct Rule {
     pub iri: &'static str,
     pub apply: fn(&Store, &GraphName, &GraphName) -> Result<Vec<Triple>>,
+    /// Tracked variant used when `MaterialiseOptions::track_dependencies`
+    /// is set (since 0.12.0). `Some(_)` for the five "core derivation"
+    /// rules whose forward shape lends itself cleanly to premise
+    /// tracking — `scm-sco`, `scm-spo`, `eq-trans`, `cax-sco`,
+    /// `prp-spo1`. `None` for the remaining 55 rules from the 0.10.0
+    /// set; their derivations still fire (via `apply`) but skip the
+    /// dependency-index write-through. Future expansion is mechanical;
+    /// each rule's tracked variant joins this slot.
+    pub apply_tracked:
+        Option<fn(&Store, &GraphName, &GraphName) -> Result<Vec<DerivedTriple>>>,
+}
+
+/// A derived triple plus the premise quads whose join produced it
+/// under one firing of the rule. The fixpoint loop writes each pair
+/// to `dependency_index::DependencyIndex` when tracking is on.
+pub(crate) struct DerivedTriple {
+    pub triple: Triple,
+    pub premises: Vec<oxigraph::model::Quad>,
 }
 
 pub(crate) static RULES: &[Rule] = &[
-    Rule { iri: "scm-sco",   apply: apply_scm_sco   },
-    Rule { iri: "scm-spo",   apply: apply_scm_spo   },
-    Rule { iri: "scm-eqc1",  apply: apply_scm_eqc1  },
-    Rule { iri: "scm-eqp1",  apply: apply_scm_eqp1  },
-    Rule { iri: "cax-sco",   apply: apply_cax_sco   },
-    Rule { iri: "prp-spo1",  apply: apply_prp_spo1  },
-    Rule { iri: "prp-dom",   apply: apply_prp_dom   },
-    Rule { iri: "prp-rng",   apply: apply_prp_rng   },
-    Rule { iri: "prp-trp",   apply: apply_prp_trp   },
-    Rule { iri: "prp-symp",  apply: apply_prp_symp  },
-    Rule { iri: "prp-inv1",  apply: apply_prp_inv1  },
-    Rule { iri: "prp-inv2",  apply: apply_prp_inv2  },
-    Rule { iri: "prp-fp",    apply: apply_prp_fp    },
-    Rule { iri: "eq-sym",    apply: apply_eq_sym    },
-    Rule { iri: "eq-trans",  apply: apply_eq_trans  },
+    Rule { iri: "scm-sco",   apply: apply_scm_sco,   apply_tracked: Some(apply_scm_sco_tracked)  },
+    Rule { iri: "scm-spo",   apply: apply_scm_spo,   apply_tracked: Some(apply_scm_spo_tracked)  },
+    Rule { iri: "scm-eqc1",  apply: apply_scm_eqc1,  apply_tracked: None },
+    Rule { iri: "scm-eqp1",  apply: apply_scm_eqp1,  apply_tracked: None },
+    Rule { iri: "cax-sco",   apply: apply_cax_sco,   apply_tracked: Some(apply_cax_sco_tracked)  },
+    Rule { iri: "prp-spo1",  apply: apply_prp_spo1,  apply_tracked: Some(apply_prp_spo1_tracked) },
+    Rule { iri: "prp-dom",   apply: apply_prp_dom,   apply_tracked: None },
+    Rule { iri: "prp-rng",   apply: apply_prp_rng,   apply_tracked: None },
+    Rule { iri: "prp-trp",   apply: apply_prp_trp,   apply_tracked: None },
+    Rule { iri: "prp-symp",  apply: apply_prp_symp,  apply_tracked: None },
+    Rule { iri: "prp-inv1",  apply: apply_prp_inv1,  apply_tracked: None },
+    Rule { iri: "prp-inv2",  apply: apply_prp_inv2,  apply_tracked: None },
+    Rule { iri: "prp-fp",    apply: apply_prp_fp,    apply_tracked: None },
+    Rule { iri: "eq-sym",    apply: apply_eq_sym,    apply_tracked: None },
+    Rule { iri: "eq-trans",  apply: apply_eq_trans,  apply_tracked: Some(apply_eq_trans_tracked) },
     // ── 0.10.0 Phase B — scm-* T-Box rules ───────────────────────────────────
-    Rule { iri: "scm-cls",   apply: apply_scm_cls   },
-    Rule { iri: "scm-op",    apply: apply_scm_op    },
-    Rule { iri: "scm-dp",    apply: apply_scm_dp    },
-    Rule { iri: "scm-eqc2",  apply: apply_scm_eqc2  },
-    Rule { iri: "scm-eqp2",  apply: apply_scm_eqp2  },
-    Rule { iri: "scm-dom1",  apply: apply_scm_dom1  },
-    Rule { iri: "scm-dom2",  apply: apply_scm_dom2  },
-    Rule { iri: "scm-rng1",  apply: apply_scm_rng1  },
-    Rule { iri: "scm-rng2",  apply: apply_scm_rng2  },
-    Rule { iri: "scm-hv",    apply: apply_scm_hv    },
-    Rule { iri: "scm-svf1",  apply: apply_scm_svf1  },
-    Rule { iri: "scm-svf2",  apply: apply_scm_svf2  },
-    Rule { iri: "scm-avf1",  apply: apply_scm_avf1  },
-    Rule { iri: "scm-avf2",  apply: apply_scm_avf2  },
-    Rule { iri: "scm-int",   apply: apply_scm_int   },
-    Rule { iri: "scm-uni",   apply: apply_scm_uni   },
+    Rule { iri: "scm-cls",   apply: apply_scm_cls,   apply_tracked: None },
+    Rule { iri: "scm-op",    apply: apply_scm_op,    apply_tracked: None },
+    Rule { iri: "scm-dp",    apply: apply_scm_dp,    apply_tracked: None },
+    Rule { iri: "scm-eqc2",  apply: apply_scm_eqc2,  apply_tracked: None },
+    Rule { iri: "scm-eqp2",  apply: apply_scm_eqp2,  apply_tracked: None },
+    Rule { iri: "scm-dom1",  apply: apply_scm_dom1,  apply_tracked: None },
+    Rule { iri: "scm-dom2",  apply: apply_scm_dom2,  apply_tracked: None },
+    Rule { iri: "scm-rng1",  apply: apply_scm_rng1,  apply_tracked: None },
+    Rule { iri: "scm-rng2",  apply: apply_scm_rng2,  apply_tracked: None },
+    Rule { iri: "scm-hv",    apply: apply_scm_hv,    apply_tracked: None },
+    Rule { iri: "scm-svf1",  apply: apply_scm_svf1,  apply_tracked: None },
+    Rule { iri: "scm-svf2",  apply: apply_scm_svf2,  apply_tracked: None },
+    Rule { iri: "scm-avf1",  apply: apply_scm_avf1,  apply_tracked: None },
+    Rule { iri: "scm-avf2",  apply: apply_scm_avf2,  apply_tracked: None },
+    Rule { iri: "scm-int",   apply: apply_scm_int,   apply_tracked: None },
+    Rule { iri: "scm-uni",   apply: apply_scm_uni,   apply_tracked: None },
     // ── 0.10.0 Phase C — class-expression A-Box rules ────────────────────────
-    Rule { iri: "cls-thing",    apply: apply_cls_thing    },
-    Rule { iri: "cls-nothing1", apply: apply_cls_nothing1 },
-    Rule { iri: "cls-int1",     apply: apply_cls_int1     },
-    Rule { iri: "cls-int2",     apply: apply_cls_int2     },
-    Rule { iri: "cls-uni",      apply: apply_cls_uni      },
-    Rule { iri: "cls-svf1",     apply: apply_cls_svf1     },
-    Rule { iri: "cls-svf2",     apply: apply_cls_svf2     },
-    Rule { iri: "cls-avf",      apply: apply_cls_avf      },
-    Rule { iri: "cls-hv1",      apply: apply_cls_hv1      },
-    Rule { iri: "cls-hv2",      apply: apply_cls_hv2      },
-    Rule { iri: "cls-maxc2",    apply: apply_cls_maxc2    },
-    Rule { iri: "cls-maxqc3",   apply: apply_cls_maxqc3   },
-    Rule { iri: "cls-maxqc4",   apply: apply_cls_maxqc4   },
-    Rule { iri: "cls-oo",       apply: apply_cls_oo       },
-    Rule { iri: "cax-eqc1",     apply: apply_cax_eqc1     },
-    Rule { iri: "cax-eqc2",     apply: apply_cax_eqc2     },
+    Rule { iri: "cls-thing",    apply: apply_cls_thing,    apply_tracked: None },
+    Rule { iri: "cls-nothing1", apply: apply_cls_nothing1, apply_tracked: None },
+    Rule { iri: "cls-int1",     apply: apply_cls_int1,     apply_tracked: None },
+    Rule { iri: "cls-int2",     apply: apply_cls_int2,     apply_tracked: None },
+    Rule { iri: "cls-uni",      apply: apply_cls_uni,      apply_tracked: None },
+    Rule { iri: "cls-svf1",     apply: apply_cls_svf1,     apply_tracked: None },
+    Rule { iri: "cls-svf2",     apply: apply_cls_svf2,     apply_tracked: None },
+    Rule { iri: "cls-avf",      apply: apply_cls_avf,      apply_tracked: None },
+    Rule { iri: "cls-hv1",      apply: apply_cls_hv1,      apply_tracked: None },
+    Rule { iri: "cls-hv2",      apply: apply_cls_hv2,      apply_tracked: None },
+    Rule { iri: "cls-maxc2",    apply: apply_cls_maxc2,    apply_tracked: None },
+    Rule { iri: "cls-maxqc3",   apply: apply_cls_maxqc3,   apply_tracked: None },
+    Rule { iri: "cls-maxqc4",   apply: apply_cls_maxqc4,   apply_tracked: None },
+    Rule { iri: "cls-oo",       apply: apply_cls_oo,       apply_tracked: None },
+    Rule { iri: "cax-eqc1",     apply: apply_cax_eqc1,     apply_tracked: None },
+    Rule { iri: "cax-eqc2",     apply: apply_cax_eqc2,     apply_tracked: None },
     // ── 0.10.0 Phase D — remaining property + equality rules ────────────────
-    Rule { iri: "prp-ifp",   apply: apply_prp_ifp   },
-    Rule { iri: "prp-spo2",  apply: apply_prp_spo2  },
-    Rule { iri: "prp-eqp1",  apply: apply_prp_eqp1  },
-    Rule { iri: "prp-eqp2",  apply: apply_prp_eqp2  },
-    Rule { iri: "prp-key",   apply: apply_prp_key   },
-    Rule { iri: "eq-ref",    apply: apply_eq_ref    },
-    Rule { iri: "eq-rep-s",  apply: apply_eq_rep_s  },
-    Rule { iri: "eq-rep-p",  apply: apply_eq_rep_p  },
-    Rule { iri: "eq-rep-o",  apply: apply_eq_rep_o  },
+    Rule { iri: "prp-ifp",   apply: apply_prp_ifp,   apply_tracked: None },
+    Rule { iri: "prp-spo2",  apply: apply_prp_spo2,  apply_tracked: None },
+    Rule { iri: "prp-eqp1",  apply: apply_prp_eqp1,  apply_tracked: None },
+    Rule { iri: "prp-eqp2",  apply: apply_prp_eqp2,  apply_tracked: None },
+    Rule { iri: "prp-key",   apply: apply_prp_key,   apply_tracked: None },
+    Rule { iri: "eq-ref",    apply: apply_eq_ref,    apply_tracked: None },
+    Rule { iri: "eq-rep-s",  apply: apply_eq_rep_s,  apply_tracked: None },
+    Rule { iri: "eq-rep-p",  apply: apply_eq_rep_p,  apply_tracked: None },
+    Rule { iri: "eq-rep-o",  apply: apply_eq_rep_o,  apply_tracked: None },
     // ── 0.10.0 Phase E — datatype rules ──────────────────────────────────────
-    Rule { iri: "dt-type1",  apply: apply_dt_type1  },
-    Rule { iri: "dt-type2",  apply: apply_dt_type2  },
-    Rule { iri: "dt-eq",     apply: apply_dt_eq     },
-    Rule { iri: "dt-diff",   apply: apply_dt_diff   },
+    Rule { iri: "dt-type1",  apply: apply_dt_type1,  apply_tracked: None },
+    Rule { iri: "dt-type2",  apply: apply_dt_type2,  apply_tracked: None },
+    Rule { iri: "dt-eq",     apply: apply_dt_eq,     apply_tracked: None },
+    Rule { iri: "dt-diff",   apply: apply_dt_diff,   apply_tracked: None },
 ];
 
 /// Rule IRIs of the eq-rep-* family. Skipped by the fixpoint loop when
@@ -1984,6 +2002,176 @@ fn apply_dt_diff(_store: &Store, _a: &GraphName, _i: &GraphName) -> Result<Vec<T
 // fixpoint loop (still landing in `super`).
 #[allow(dead_code)]
 fn _unused_subject_ref_marker(_: SubjectRef<'_>, _: BlankNodeRef<'_>) {}
+
+// ── 0.12.0 tracked-rule variants (dependency-index write-through) ────────────
+//
+// These mirror the five core derivation rules but additionally return the
+// premise quads whose join produced each derived triple. The fixpoint loop in
+// `super::execute_materialise` calls these when
+// `MaterialiseOptions::track_dependencies` is set, and threads each
+// `(triple, premises)` into `dependency_index::with_index(|i| i.record(...))`.
+// Other rules continue through the un-tracked `apply` path; their derivations
+// are invisible to `rdf_dred_overdelete`.
+//
+// The shape mirrors each rule's premise pattern verbatim — `transitive_closure`
+// joins `(x, p, y) ⨝ (y, p, z)`, so each derived `(x, p, z)` carries those two
+// premise quads.
+
+use oxigraph::model::Quad;
+
+/// Collect (subject, object, source-graph quad) tuples for a predicate
+/// across the asserted + inferred graphs. Returned `Quad`s carry their
+/// original graph names so the index records them precisely. Duplicates
+/// (same triple in both asserted and inferred — rare but possible) are
+/// collapsed by quad-key.
+fn quads_for_predicate(
+    store: &Store,
+    predicate: NamedNodeRef<'_>,
+    asserted: &GraphName,
+    inferred: &GraphName,
+) -> Result<Vec<Quad>> {
+    let mut out: Vec<Quad> = Vec::new();
+    let mut seen: HashSet<Quad> = HashSet::new();
+    for graph in graphs_to_query(asserted, inferred) {
+        let g_ref = graph_to_ref(graph);
+        for q in store.quads_for_pattern(None, Some(predicate), None, Some(g_ref)) {
+            let q = q.map_err(|e| SparqlError::StoreError(e.to_string()))?;
+            if seen.insert(q.clone()) {
+                out.push(q);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn all_quads_vec(
+    store: &Store,
+    asserted: &GraphName,
+    inferred: &GraphName,
+) -> Result<Vec<Quad>> {
+    let mut out: Vec<Quad> = Vec::new();
+    let mut seen: HashSet<Quad> = HashSet::new();
+    for graph in graphs_to_query(asserted, inferred) {
+        let g_ref = graph_to_ref(graph);
+        for q in store.quads_for_pattern(None, None, None, Some(g_ref)) {
+            let q = q.map_err(|e| SparqlError::StoreError(e.to_string()))?;
+            if seen.insert(q.clone()) {
+                out.push(q);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Tracked transitive closure for predicates whose both ends are nodes.
+/// Used by `scm-sco`, `scm-spo`, and `eq-trans`.
+fn transitive_closure_tracked(
+    store: &Store,
+    predicate: NamedNodeRef<'_>,
+    a: &GraphName,
+    i: &GraphName,
+) -> Result<Vec<DerivedTriple>> {
+    let quads = quads_for_predicate(store, predicate, a, i)?;
+    // adjacency: subject term → list of (object term, source quad)
+    let mut by_subject: HashMap<Subject, Vec<Quad>> = HashMap::new();
+    for q in &quads {
+        by_subject.entry(q.subject.clone()).or_default().push(q.clone());
+    }
+    let mut derived = Vec::new();
+    for qxy in &quads {
+        let Some(y_as_subj) = term_to_subj(&qxy.object) else {
+            continue;
+        };
+        let Some(next) = by_subject.get(&y_as_subj) else {
+            continue;
+        };
+        for qyz in next {
+            derived.push(DerivedTriple {
+                triple: triple(qxy.subject.clone(), predicate, qyz.object.clone()),
+                premises: vec![qxy.clone(), qyz.clone()],
+            });
+        }
+    }
+    Ok(derived)
+}
+
+fn apply_scm_sco_tracked(store: &Store, a: &GraphName, i: &GraphName) -> Result<Vec<DerivedTriple>> {
+    transitive_closure_tracked(store, RDFS_SUB_CLASS_OF, a, i)
+}
+
+fn apply_scm_spo_tracked(store: &Store, a: &GraphName, i: &GraphName) -> Result<Vec<DerivedTriple>> {
+    transitive_closure_tracked(store, RDFS_SUB_PROPERTY_OF, a, i)
+}
+
+fn apply_eq_trans_tracked(store: &Store, a: &GraphName, i: &GraphName) -> Result<Vec<DerivedTriple>> {
+    transitive_closure_tracked(store, OWL_SAME_AS, a, i)
+}
+
+/// `cax-sco` tracked: `(s, rdf:type, c1)` ⨝ `(c1, rdfs:subClassOf, c2)`
+/// → `(s, rdf:type, c2)` with the two source quads as premises.
+fn apply_cax_sco_tracked(store: &Store, a: &GraphName, i: &GraphName) -> Result<Vec<DerivedTriple>> {
+    let sub_class_quads = quads_for_predicate(store, RDFS_SUB_CLASS_OF, a, i)?;
+    let type_quads = quads_for_predicate(store, RDF_TYPE, a, i)?;
+    // class subject → list of source quads `(c1, sco, c2)`.
+    let mut super_of: HashMap<Subject, Vec<Quad>> = HashMap::new();
+    for sq in &sub_class_quads {
+        super_of.entry(sq.subject.clone()).or_default().push(sq.clone());
+    }
+    let mut derived = Vec::new();
+    for tq in &type_quads {
+        let Some(c1_as_subj) = term_to_subj(&tq.object) else {
+            continue;
+        };
+        let Some(supers) = super_of.get(&c1_as_subj) else {
+            continue;
+        };
+        for sq in supers {
+            derived.push(DerivedTriple {
+                triple: triple(tq.subject.clone(), RDF_TYPE, sq.object.clone()),
+                premises: vec![tq.clone(), sq.clone()],
+            });
+        }
+    }
+    Ok(derived)
+}
+
+/// `prp-spo1` tracked: `(s, p1, o)` ⨝ `(p1, rdfs:subPropertyOf, p2)`
+/// → `(s, p2, o)`.
+fn apply_prp_spo1_tracked(
+    store: &Store,
+    a: &GraphName,
+    i: &GraphName,
+) -> Result<Vec<DerivedTriple>> {
+    let sub_prop_quads = quads_for_predicate(store, RDFS_SUB_PROPERTY_OF, a, i)?;
+    // property IRI → list of source quads `(p1, spo, p2)`.
+    let mut super_of: HashMap<NamedNode, Vec<Quad>> = HashMap::new();
+    for sq in &sub_prop_quads {
+        let Subject::NamedNode(p1_n) = &sq.subject else {
+            continue;
+        };
+        if term_to_named(&sq.object).is_none() {
+            continue;
+        }
+        super_of.entry(p1_n.clone()).or_default().push(sq.clone());
+    }
+    let quads = all_quads_vec(store, a, i)?;
+    let mut derived = Vec::new();
+    for tq in &quads {
+        let Some(supers) = super_of.get(&tq.predicate) else {
+            continue;
+        };
+        for sq in supers {
+            let Some(p2_n) = term_to_named(&sq.object) else {
+                continue;
+            };
+            derived.push(DerivedTriple {
+                triple: Triple::new(tq.subject.clone(), p2_n, tq.object.clone()),
+                premises: vec![tq.clone(), sq.clone()],
+            });
+        }
+    }
+    Ok(derived)
+}
 
 #[cfg(test)]
 mod tests {

@@ -62,6 +62,16 @@ pub(crate) struct MaterialiseOptions {
     /// reasoner that expects the reflexive saturation.
     #[serde(default)]
     pub eq_reflexive: bool,
+    /// 0.12.0 — populate the native dependency index as the fixpoint
+    /// runs, so a subsequent `rdf_dred_overdelete` can identify inferred
+    /// quads whose support is invalidated when a premise is retracted.
+    /// Default `false` because tracking has a real allocation cost; turn
+    /// on only when the consumer plans a DRed cycle. Tracked rules in
+    /// 0.12.0: `scm-sco`, `scm-spo`, `eq-trans`, `cax-sco`, `prp-spo1`.
+    /// Untracked rules still fire; their derivations just don't write
+    /// through to the index.
+    #[serde(default)]
+    pub track_dependencies: bool,
 }
 
 fn default_max_iterations() -> usize {
@@ -163,6 +173,9 @@ fn execute_materialise(
             // iteration, all derived triples share the same provenance time.
             let now = now_rfc3339();
             let mut new_quads: Vec<Quad> = Vec::new();
+            // Records to push into the dependency index after we know which
+            // derived quads were actually fresh (i.e., not already present).
+            let mut to_record: Vec<(Quad, Vec<Quad>)> = Vec::new();
             for rule in rules::RULES {
                 if !opts.equality_saturation
                     && rules::EQ_REP_RULE_IRIS.contains(&rule.iri)
@@ -172,6 +185,53 @@ fn execute_materialise(
                 if !opts.eq_reflexive && rule.iri == rules::EQ_REF_RULE_IRI {
                     continue;
                 }
+
+                // When tracking is on AND the rule has a tracked variant,
+                // use it so we capture premise quads. Otherwise fall back to
+                // the un-tracked path — the rule still fires, the index just
+                // doesn't see it (documented limitation for non-core rules
+                // in 0.12.0).
+                if opts.track_dependencies {
+                    if let Some(tracked) = rule.apply_tracked {
+                        let derived = tracked(store, &asserted_g, &inferred_g).map_err(|e| {
+                            SparqlError::EvalError(format!(
+                                "rdf_owl_rl_materialise: rule {} error at iteration {iteration}: {e}",
+                                rule.iri
+                            ))
+                        })?;
+                        for dt in derived {
+                            let q = Quad::new(
+                                dt.triple.subject.clone(),
+                                dt.triple.predicate.clone(),
+                                dt.triple.object.clone(),
+                                inferred_g.clone(),
+                            );
+                            if store.contains(&q).unwrap_or(false) {
+                                // Even if the quad is already in the store,
+                                // a NEW derivation found in this iteration
+                                // is still worth recording — multi-derivation
+                                // matters for cascade correctness.
+                                to_record.push((q.clone(), dt.premises.clone()));
+                                continue;
+                            }
+                            new_quads.push(q.clone());
+                            to_record.push((q, dt.premises));
+                            if opts.provenance {
+                                new_quads.extend(provenance_annotations(
+                                    &dt.triple,
+                                    rule.iri,
+                                    &opts,
+                                    &inferred_g,
+                                    &derived_by_node,
+                                    &derived_at_node,
+                                    &now,
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+                }
+
                 let derived = (rule.apply)(store, &asserted_g, &inferred_g).map_err(|e| {
                     SparqlError::EvalError(format!(
                         "rdf_owl_rl_materialise: rule {} error at iteration {iteration}: {e}",
@@ -201,6 +261,18 @@ fn execute_materialise(
                         ));
                     }
                 }
+            }
+
+            // Flush index records before deciding fixpoint convergence —
+            // a rule may derive an already-present quad but with a NEW
+            // derivation, which is itself progress for the index (though
+            // not for the store; fixpoint correctly ignores it).
+            if opts.track_dependencies && !to_record.is_empty() {
+                crate::dependency_index::with_index(|idx| {
+                    for (q, premises) in to_record.drain(..) {
+                        idx.record(q, premises.into_iter().collect());
+                    }
+                });
             }
 
             if new_quads.is_empty() {

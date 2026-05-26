@@ -320,6 +320,57 @@ fixed-prefix errors so consumers can pattern-match. `data_iri =
 NULL` means the default graph (same convention as
 `rdf_owl_rl_materialise`).
 
+### Incremental reasoning with DRed (since 0.12.0)
+
+For incremental reasoning workloads, `rdf_dred_overdelete` is the
+"delete-and-rederive" primitive: given a set of premises that the
+consumer has retracted, it walks the native dependency index and
+removes every inferred quad whose every derivation became invalid
+— transitively, so a removed inferred quad cascades to anything it
+itself supports.
+
+```sql
+-- Step 1: enable tracking on the materialise pass.
+SELECT rdf_owl_rl_materialise(
+  NULL,                         -- asserted graph (default)
+  'urn:g:catalogue:inferred',   -- inferred graph
+  '{"track_dependencies": true}'
+);
+
+-- Step 2 (consumer): remove the asserted-graph premise(s).
+SELECT rdf_delete(
+  'http://example.org/B',
+  'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+  'http://example.org/C'
+);
+
+-- Step 3: over-delete in one FFI crossing.
+SELECT rdf_dred_overdelete(
+  'urn:g:catalogue:inferred',
+  json('[["http://example.org/B",
+          "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+          "http://example.org/C"]]')
+);
+-- => INTEGER (count of over-deleted inferred quads)
+
+-- Step 4 (consumer): re-materialise to fill in anything still
+-- derivable from the remaining facts. Repopulates the index.
+SELECT rdf_owl_rl_materialise(NULL, 'urn:g:catalogue:inferred',
+  '{"track_dependencies": true}');
+```
+
+`track_dependencies` defaults to `false` — the per-derivation
+allocation cost is real, so the option is opt-in. The dependency
+index records derivations from the five W3C OWL 2 RL "core
+derivation" rules in 0.12.0 (`scm-sco`, `scm-spo`, `eq-trans`,
+`cax-sco`, `prp-spo1`); other rules fire as usual but skip the
+write-through. Expansion to the remaining 55 rules is mechanical
+and waits on a consumer pull.
+
+The index is in-memory and process-scoped. `rdf_clear()` clears
+it in lockstep with the store; persistence across process
+restarts ties to the deferred RocksDB backend.
+
 ### Bulk Load (Turtle)
 
 ```sql
@@ -520,7 +571,9 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] Full OWL 2 RL derivation coverage (60 rules) — landed in 0.10.0
 - [x] Native SHACL Core validator pass (12-constraint subset matching
       VG `ConstraintLibrary`, 7 path forms) — landed in 0.11.0
-- [ ] Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
+- [x] Native dependency index for DRed (5 core derivation rules,
+      `rdf_dred_overdelete` + `track_dependencies` materialise option)
+      — landed in 0.12.0
 - [ ] OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) — future
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails

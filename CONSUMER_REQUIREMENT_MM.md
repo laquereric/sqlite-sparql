@@ -204,6 +204,16 @@ required:
   evaluator. vv-graph driver (`Vv::Graph::Shacl.validate!` would
   route through this once the gem floor bumps to engine ≥ 0.11.0);
   no MM call site today.
+- `rdf_dred_overdelete(inferred_iri, retracted_premises_json) →
+  INTEGER` (from 0.12.0) — paired with a new `track_dependencies`
+  option on `rdf_owl_rl_materialise`. Powers DRed-style
+  delete-and-rederive incremental reasoning via a native side-table
+  mapping inferred quads to per-derivation premise sets. 0.12.0
+  tracks five W3C "core derivation" rules (`scm-sco`, `scm-spo`,
+  `eq-trans`, `cax-sco`, `prp-spo1`); other rules still fire but
+  skip the index write-through. vv-graph driver
+  (`Vv::Graph::Reasoner.dred!` once that ships PLAN_0.11.0 Phase A);
+  no MM call site today.
 
 ## Behaviours MM does NOT depend on
 

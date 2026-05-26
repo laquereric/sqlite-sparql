@@ -416,42 +416,42 @@ Vv::Graph PLAN_0.10.0 Phase E's pinned predicates (`sh:focusNode`,
 `sh:resultSeverity`, `sh:resultMessage`) and the optional
 RDF-star provenance annotations.
 
-### 8. Native dependency index for DRed
+### 8. Native dependency index for DRed — LANDED in 0.12.0
 
-**Originating Vv::Graph plan:** `docs/plans/PLAN_0.11.0.md` ("Engine
-prerequisites" → option 1: "Native dependency index").
+Live as `rdf_dred_overdelete(inferred_iri, retracted_premises_json)
+→ INTEGER`, paired with the new `track_dependencies` option on
+`rdf_owl_rl_materialise`. The side-table is keyed on Oxigraph
+`Quad` (subject + predicate + object + graph) and stores
+*per-derivation* premise sets, not the union sketched in the
+original ask. The cascade visits transitive dependents and only
+over-deletes when every derivation has been broken — pinned by
+the multi-derivation integration test.
 
-**Ask.** A side-table inside the engine mapping each
-inferred-triple ID to its premise triple IDs, maintained as a
-write-through during `rdf_owl_rl_materialise` /
-`rdf_shacl_rules_materialise` (ask #6 + #9). DRed's
-over-deletion phase (PLAN_0.11.0 Phase B) consults this index
-instead of pattern-matching against `:derivedFrom` RDF-star
-annotations.
+Two notes on how the landed shape differs from the original ask:
 
-**Concrete surface Vv::Graph would call:**
+- **Rule coverage in 0.12.0 is the five W3C "core derivation"
+  shapes** (`scm-sco`, `scm-spo`, `eq-trans`, `cax-sco`,
+  `prp-spo1`), not all 60. The fixpoint loop still fires every
+  rule when `track_dependencies: true`, but the remaining 55
+  skip the index write-through. Expansion to the rest is
+  mechanical (each rule mirrors its premise-collecting helper
+  to retain source quads) and waits on a Vv::Graph signal that
+  DRed bottlenecks on non-core rules.
+- **SHACL Rules / `rdf_construct_many` are not write-through
+  sites.** Only `rdf_owl_rl_materialise` populates the index in
+  0.12.0. If Vv::Graph's SHACL Rules materialisation grows a
+  DRed cycle, the `rdf_construct_many` consumer would need to
+  manually `rdf_dred_record_derivation(inferred, premises_json)`
+  (not yet implemented; revive on ask).
 
-```sql
--- Over-delete every inferred triple whose support touches a retracted premise.
-SELECT rdf_dred_overdelete(
-  'urn:mm:graph:catalogue:inferred',
-  json('[ ["urn:mm:product:1", "schema:gtin", "1234567890123"] ]')  -- retracted premises
-);
--- => INTEGER (over-deleted count)
-```
+`track_dependencies` defaults to `false` because the tracking
+write-through roughly doubles per-derivation allocation cost.
+The index is in-memory and process-scoped; `rdf_clear()` clears
+it in lockstep. Persistence across process restarts ties to the
+deferred RocksDB backend.
 
-**Why this would help Vv::Graph.** Today's DRed pattern-matches the
-`:derivedFrom` annotation graph for every retracted premise.
-On a dense provenance graph (high fan-in per inferred triple)
-this is O(retracted × inferred-with-overlap) and is the
-prime DRed bottleneck. A native index makes the lookup O(log N)
-per premise.
-
-**Compatibility constraint.** Index must survive engine restarts
-if the inferred graph is persisted (today it doesn't — store
-is in-memory — but PLAN_0.7.0's EtherealGraph reloads the
-inferred graph blob; the index would be rebuildable from the
-RDF-star annotations on hydrate).
+See `docs/plans/PLAN_0.12.0.md` and `src/dependency_index.rs`
+for the full design.
 
 ### 9. Batched SHACL Rules execution — LANDED in 0.8.0
 

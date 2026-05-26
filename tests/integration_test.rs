@@ -2774,4 +2774,449 @@ mod tests {
         assert_eq!(count, 1);
         Ok(())
     }
+
+    // ── 0.12.0 rdf_dred_overdelete ────────────────────────────────────────────
+
+    /// Seed a `scm-sco` chain `:A ⊑ :B ⊑ :C` in the default graph and
+    /// materialise it into `urn:g:inferred` with `track_dependencies: true`.
+    /// Returns the post-materialise inferred-graph count for sanity.
+    fn seed_scm_sco_chain(conn: &Connection) -> Result<i64> {
+        conn.execute_batch(
+            r#"
+            SELECT rdf_insert(
+              'http://example.org/A',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/B'
+            );
+            SELECT rdf_insert(
+              'http://example.org/B',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/C'
+            );
+            "#,
+        )?;
+        conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred',
+                 json('{\"track_dependencies\": true}'))",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+    }
+
+    /// Count quads in a named graph.
+    fn count_in_graph(conn: &Connection, g: &str) -> Result<i64> {
+        let q = format!(
+            "SELECT COUNT(*) FROM (SELECT sparql_query(
+               'SELECT ?s WHERE {{ GRAPH <{g}> {{ ?s ?p ?o }} }}'
+             ) j, json_each(j))"
+        );
+        conn.query_row(&q, [], |r| r.get(0))
+    }
+
+    /// Convenience: does the inferred graph contain a specific triple?
+    fn inferred_has(conn: &Connection, s: &str, p: &str, o: &str) -> Result<bool> {
+        let q = format!(
+            "ASK {{ GRAPH <urn:g:inferred> {{ <{s}> <{p}> <{o}> }} }}"
+        );
+        sparql_ask(&conn, &q)
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_direct_dependency() -> Result<()> {
+        let conn = open_with_extension()?;
+        seed_scm_sco_chain(&conn)?;
+        // The inferred graph should contain A ⊑ C via scm-sco.
+        assert!(inferred_has(
+            &conn,
+            "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/C"
+        )?);
+
+        // Retract the B ⊑ C asserted premise (consumer-side delete is
+        // out of scope for this test — we just hand the premise to
+        // overdelete and verify the inferred derivation cascades).
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/B",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/C"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed, 1, "exactly the derived A⊑C should over-delete");
+        assert!(!inferred_has(
+            &conn,
+            "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/C"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_transitive_cascade() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Three-level chain :A ⊑ :B ⊑ :C ⊑ :D so we get two
+        // transitive-closure derivations chained via :B-:D.
+        conn.execute_batch(
+            r#"
+            SELECT rdf_insert(
+              'http://example.org/A',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/B'
+            );
+            SELECT rdf_insert(
+              'http://example.org/B',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/C'
+            );
+            SELECT rdf_insert(
+              'http://example.org/C',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/D'
+            );
+            "#,
+        )?;
+        conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred',
+                 json('{\"track_dependencies\": true}'))",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        // scm-sco closure: {A⊑C, B⊑D, A⊑D} — three derivations.
+        assert!(inferred_has(
+            &conn, "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/D"
+        )?);
+
+        // Retract B⊑C: removes A⊑C (direct), and A⊑D loses one
+        // derivation. The other derivation of A⊑D (via A⊑B + B⊑D
+        // where B⊑D itself depends on B⊑C → C⊑D) also breaks because
+        // B⊑D depended on B⊑C. So A⊑D and B⊑D and A⊑C all cascade.
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/B",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/C"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed, 3, "A⊑C, B⊑D, A⊑D all cascade");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_preserves_other_inferences() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Two independent chains share no premises. Retract one premise
+        // chain → the other chain's inferences survive.
+        conn.execute_batch(
+            r#"
+            SELECT rdf_insert(
+              'http://example.org/A',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/B'
+            );
+            SELECT rdf_insert(
+              'http://example.org/B',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/C'
+            );
+            SELECT rdf_insert(
+              'http://example.org/X',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/Y'
+            );
+            SELECT rdf_insert(
+              'http://example.org/Y',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/Z'
+            );
+            "#,
+        )?;
+        conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred',
+                 json('{\"track_dependencies\": true}'))",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        // Retract A⊑B → only A⊑C cascades; X⊑Z survives.
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/A",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/B"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed, 1);
+        assert!(inferred_has(
+            &conn, "http://example.org/X",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/Z"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_no_op_when_no_dependents() -> Result<()> {
+        let conn = open_with_extension()?;
+        seed_scm_sco_chain(&conn)?;
+        // A premise that's not in the index → return 0, no changes.
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/QQQ",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/RRR"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed, 0);
+        // The original derivation still there.
+        assert!(inferred_has(
+            &conn, "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/C"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_requires_track_dependencies() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Materialise WITHOUT track_dependencies → index stays empty.
+        conn.execute_batch(
+            r#"
+            SELECT rdf_insert(
+              'http://example.org/A',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/B'
+            );
+            SELECT rdf_insert(
+              'http://example.org/B',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/C'
+            );
+            "#,
+        )?;
+        conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        // Now over-delete should error with the fixed-prefix wiring message.
+        let err = conn
+            .query_row(
+                r#"SELECT rdf_dred_overdelete(
+                     'urn:g:inferred',
+                     json('[["http://example.org/B",
+                            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                            "http://example.org/C"]]')
+                   )"#,
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rdf_dred_overdelete: no dependency index"),
+            "expected fixed-prefix error, got: {msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_full_cycle_overdelete_then_rematerialise() -> Result<()> {
+        let conn = open_with_extension()?;
+        seed_scm_sco_chain(&conn)?;
+
+        // Retract B⊑C and run overdelete → A⊑C is over-deleted.
+        conn.execute_batch(
+            r#"SELECT rdf_delete(
+                 'http://example.org/B',
+                 'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+                 'http://example.org/C'
+               );"#,
+        )?;
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/B",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/C"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed, 1);
+
+        // Re-materialise: nothing else to derive (B⊑C is gone).
+        let delta: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred',
+                 json('{\"track_dependencies\": true}'))",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(delta, 0);
+        assert!(!inferred_has(
+            &conn, "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/C"
+        )?);
+
+        // Now re-add B⊑C and re-materialise: A⊑C reappears.
+        conn.execute_batch(
+            r#"SELECT rdf_insert(
+                 'http://example.org/B',
+                 'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+                 'http://example.org/C'
+               );"#,
+        )?;
+        let delta2: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred',
+                 json('{\"track_dependencies\": true}'))",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(delta2 >= 1);
+        assert!(inferred_has(
+            &conn, "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/C"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_multi_derivation() -> Result<()> {
+        let conn = open_with_extension()?;
+        // A⊑B1⊑C and A⊑B2⊑C — two independent derivations of A⊑C.
+        // Retract one chain's premise → A⊑C survives via the other.
+        conn.execute_batch(
+            r#"
+            SELECT rdf_insert(
+              'http://example.org/A',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/B1'
+            );
+            SELECT rdf_insert(
+              'http://example.org/B1',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/C'
+            );
+            SELECT rdf_insert(
+              'http://example.org/A',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/B2'
+            );
+            SELECT rdf_insert(
+              'http://example.org/B2',
+              'http://www.w3.org/2000/01/rdf-schema#subClassOf',
+              'http://example.org/C'
+            );
+            "#,
+        )?;
+        conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred',
+                 json('{\"track_dependencies\": true}'))",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        // Retract just B1⊑C → A⊑C should SURVIVE (still derivable via B2).
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/B1",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/C"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        // Nothing fully cascades: A⊑C has another derivation alive.
+        assert_eq!(removed, 0);
+        assert!(inferred_has(
+            &conn, "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/C"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_clears_index_entry() -> Result<()> {
+        let conn = open_with_extension()?;
+        seed_scm_sco_chain(&conn)?;
+        // Retract B⊑C → A⊑C cascades.
+        let removed: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/B",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/C"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed, 1);
+        // Calling again with the same premise → index entry already gone,
+        // no further cascade.
+        let removed2: i64 = conn.query_row(
+            r#"SELECT rdf_dred_overdelete(
+                 'urn:g:inferred',
+                 json('[["http://example.org/B",
+                        "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+                        "http://example.org/C"]]')
+               )"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(removed2, 0);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_dred_overdelete_rejects_empty_inferred_iri() -> Result<()> {
+        let conn = open_with_extension()?;
+        seed_scm_sco_chain(&conn)?;
+        let err = conn
+            .query_row(
+                r#"SELECT rdf_dred_overdelete('', '[]')"#,
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("inferred_iri must be a named graph"),
+            "expected named-graph error, got: {msg}"
+        );
+        Ok(())
+    }
+
+    // Note: count_in_graph kept as a developer probe; not used by every
+    // test but useful when adding new ones.
+    #[allow(dead_code)]
+    fn _keep_count_in_graph(conn: &Connection, g: &str) -> Result<i64> {
+        count_in_graph(conn, g)
+    }
 }

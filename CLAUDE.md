@@ -179,11 +179,19 @@ one-or-more / zero-or-one. Report graph is cleared before each
 call. Driver: VG CR #7. See `docs/plans/PLAN_0.11.0.md` and
 `src/functions/rdf_shacl_core/`.
 
-### 9. Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
-A side-table mapping inferred-triple IDs to their premise triple IDs,
-maintained as a write-through during `rdf_owl_rl_materialise`. Powers
-DRed's over-deletion phase without pattern-matching against
-`:derivedFrom` RDF-star annotations.
+### 9. Native dependency index for DRed — DONE in 0.12.0
+`rdf_dred_overdelete(inferred_iri, retracted_premises_json) → INTEGER`
+consumes a side-table mapping inferred quads to their per-derivation
+premise sets, populated as a write-through during
+`rdf_owl_rl_materialise` when called with the new
+`{"track_dependencies": true}` option. Replaces the consumer-side
+O(retracted × inferred) SPARQL pattern match against a
+`:derivedFrom` annotation graph with an O(log N)-per-premise reverse-
+index lookup and a transitive cascade. 0.12.0 tracks the five W3C
+"core derivation" rules (`scm-sco`, `scm-spo`, `eq-trans`, `cax-sco`,
+`prp-spo1`); the remaining 55 rules still fire but skip the
+write-through. Driver: VG CR #8. See `docs/plans/PLAN_0.12.0.md`,
+`src/dependency_index.rs`, and `src/functions/rdf_dred.rs`.
 
 ### 10. Persistent Store (RocksDB backend) — DEFERRED
 No consumer asks for persistence. If it lands, replace the in-memory
@@ -363,6 +371,63 @@ SELECT rdf_shacl_core_validate(
 --   - The remaining ~18 SHACL Core constraints in VG's PHASE_B_PENDING.
 --   - SHACL Advanced (sh:function, sh:expression).
 ```
+
+### Incremental reasoning with DRed (since 0.12.0)
+
+```sql
+-- Step 1: populate the dependency index during materialise.
+-- `track_dependencies` defaults to false (extra allocation cost);
+-- turn it on only when a DRed cycle follows.
+SELECT rdf_owl_rl_materialise(
+  NULL,                         -- asserted graph (default)
+  'urn:g:catalogue:inferred',   -- inferred graph
+  json('{"track_dependencies": true}')
+);
+
+-- Step 2 (consumer): retract one or more asserted-graph premises
+-- the usual way (rdf_delete, sparql_update, rdf_triples DML).
+
+-- Step 3: over-delete every inferred quad whose every derivation
+-- became invalid after step 2. Cascades transitively.
+SELECT rdf_dred_overdelete(
+  'urn:g:catalogue:inferred',
+  json('[
+    ["http://example.org/B",
+     "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+     "http://example.org/C"]
+  ]')
+);
+-- => INTEGER (over-deleted count; 0 = nothing depended on those premises)
+
+-- Step 4 (consumer): re-materialise to pick up anything still
+-- derivable from the remaining facts. Repopulates the index for
+-- the next DRed cycle.
+SELECT rdf_owl_rl_materialise(NULL, 'urn:g:catalogue:inferred',
+  json('{"track_dependencies": true}'));
+```
+
+Tracked rules in 0.12.0: `scm-sco`, `scm-spo`, `eq-trans`,
+`cax-sco`, `prp-spo1` — the five W3C "core derivation" shapes.
+Other 55 rules fire as usual but don't write through; expansion
+mechanical, waits on a consumer pull.
+
+Per-derivation tracking (not the union sketched in PLAN_0.12.0):
+an inferred quad with multiple independent derivations survives
+partial retracts as long as one derivation's premise set stays
+intact.
+
+Error envelopes (fixed-prefix for consumer pattern-matching):
+- `"rdf_dred_overdelete: inferred_iri must be a named graph …"`
+- `"rdf_dred_overdelete: inferred_iri is required (NULL not allowed)"`
+- `"rdf_dred_overdelete: retracted_premises_json parse error: …"`
+- `"rdf_dred_overdelete: retracted_premises_json must be a JSON array …"`
+- `"rdf_dred_overdelete: row N must have 3 or 4 elements …"`
+- `"rdf_dred_overdelete: no dependency index — re-run
+  rdf_owl_rl_materialise with track_dependencies: true"`
+
+`rdf_clear()` clears the dependency index in lockstep with the
+store. The index is in-memory and process-scoped — every cold
+start needs a fresh tracking materialise.
 
 ### Virtual Table
 

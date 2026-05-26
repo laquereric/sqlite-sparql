@@ -1,5 +1,153 @@
 # Changelog
 
+## 0.12.0 — Native dependency index for DRed
+
+`rdf_dred_overdelete(inferred_iri, retracted_premises_json) →
+INTEGER` lands as a new top-level scalar, paired with a new
+`track_dependencies` option on `rdf_owl_rl_materialise`. Together
+they turn the consumer-side "delete-and-rederive" loop from an
+O(retracted × inferred-with-overlap) SPARQL pattern match against
+a dense `:derivedFrom` annotation graph into an O(log N)-per-
+premise reverse-index lookup against a native side-table.
+
+Driver: `CONSUMER_REQUIREMENT_VvGraph.md` § "Requested
+extensions" item **#8 — Native dependency index for DRed**.
+`Vv::Graph::ChangeSet` / `Vv::Graph::Reasoner.dred!` (PLAN_0.11.0
+Phase A on the gem side) can now route its over-deletion phase
+through this surface instead of issuing per-premise SPARQL
+round-trips.
+
+### Surface
+
+```sql
+-- Step 1: populate the dependency index during materialise.
+SELECT rdf_owl_rl_materialise(
+  NULL,                         -- asserted graph (default)
+  'urn:g:catalogue:inferred',   -- inferred graph
+  json('{"track_dependencies": true}')
+);
+
+-- Step 2 (consumer): retract one or more asserted-graph premises
+-- the usual way (rdf_delete / sparql_update / rdf_triples DML).
+
+-- Step 3: over-delete the inferred dependents in one FFI crossing.
+SELECT rdf_dred_overdelete(
+  'urn:g:catalogue:inferred',
+  json('[
+    ["http://example.org/B",
+     "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+     "http://example.org/C"]
+  ]')
+);
+-- => INTEGER (count of over-deleted inferred quads)
+
+-- Step 4 (consumer): re-materialise to pick up anything still
+-- derivable from the remaining asserted facts. The index is
+-- carried forward; subsequent overdeletes reuse it.
+SELECT rdf_owl_rl_materialise(NULL, 'urn:g:catalogue:inferred',
+  json('{"track_dependencies": true}'));
+```
+
+### Rule coverage (5 of 60 in 0.12.0)
+
+The index records derivations from the five W3C OWL 2 RL "core
+derivation" rules whose forward shape lends itself cleanly to
+premise tracking — `scm-sco`, `scm-spo`, `eq-trans` (the three
+`transitive_closure` shapes), `cax-sco`, and `prp-spo1`. The
+remaining 55 rules from the 0.10.0 set still fire under
+`track_dependencies: true`; their derivations just don't write
+through to the dependency index, and `rdf_dred_overdelete` will
+miss those quads when their premises are retracted. Expansion
+is mechanical (each rule mirrors its premise-collecting helper
+to retain source `Quad`s); the remaining 55 wait on a consumer
+pull. Forward-leaning ship per the same posture as 0.9.0 / 0.10.0
+/ 0.11.0.
+
+### Per-derivation tracking, not per-quad union
+
+The original PLAN_0.12.0 sketch proposed a single union set per
+inferred quad (`HashMap<Quad, HashSet<Quad>>`). 0.12.0 ships the
+stricter per-derivation list (`HashMap<Quad, Vec<HashSet<Quad>>>`)
+because the multi-derivation cascade rule — "remove only when
+*every* derivation has been broken" — cannot be decided from the
+union without re-proving each candidate against the current
+store. The per-derivation list lets the cascade decide locally
+in O(d) where d is the number of derivations attached to the
+candidate. The new test `test_rdf_dred_overdelete_multi_derivation`
+pins this: an inferred quad with two independent derivations
+survives a partial retract.
+
+### Cascade semantics
+
+The cascade is transitive: an over-deleted inferred quad is
+treated as a removed premise for downstream derivations. The
+worklist iterates until no new quad is added — bounded by the
+depth of the index. Retracted premises are seeded into the
+`removed` set at the start; the function does **not** remove
+the premises themselves (the consumer handles `rdf_delete` etc).
+After the cascade, the over-deleted quads are removed from the
+store via `Store::remove` and `DependencyIndex::forget` walks
+back through their derivations to drop the reverse entries.
+
+### Error envelopes (fixed-prefix for consumer pattern-matching)
+
+- `"rdf_dred_overdelete: inferred_iri must be a named graph …"`
+- `"rdf_dred_overdelete: inferred_iri is required (NULL not allowed)"`
+- `"rdf_dred_overdelete: retracted_premises_json parse error: …"`
+- `"rdf_dred_overdelete: retracted_premises_json must be a JSON array …"`
+- `"rdf_dred_overdelete: row N must have 3 or 4 elements …"`
+- `"rdf_dred_overdelete: no dependency index — re-run
+  rdf_owl_rl_materialise with track_dependencies: true"` — surfaced
+  only when the index is *entirely* empty and the consumer passed
+  non-empty premises (i.e. distinct from "this premise has no
+  dependents," which silently returns 0).
+
+### Default opt-out
+
+`track_dependencies` defaults to `false`. The tracking write-
+through roughly doubles per-derivation allocation cost
+(every tracked derivation carries a `Vec<Quad>` of premises),
+and most workloads don't run a DRed cycle. Turn it on only when
+the consumer's incremental-reasoning loop will follow up with
+`rdf_dred_overdelete`. Switching mid-stream is fine: the next
+materialise call adds new derivations to the index; the index
+persists across calls within a process.
+
+### Index lifetime
+
+In-memory, process-scoped, in lockstep with the in-memory store.
+`rdf_clear()` clears the index too (added wiring on `clear_store`
+— see `src/store.rs`). Persistence across process restarts ties
+to the deferred RocksDB backend; until then, every cold start
+needs a fresh `rdf_owl_rl_materialise(... track_dependencies:
+true)` to repopulate the index before `rdf_dred_overdelete` can
+do anything useful.
+
+### Implementation
+
+- `src/dependency_index.rs` — `DependencyIndex` (forward + reverse
+  maps), `cascade`, `forget`, `clear`, process-wide singleton via
+  `OnceLock<Mutex<_>>`. 5 unit tests.
+- `src/functions/rdf_owl_rl.rs` — adds the `track_dependencies`
+  option; the fixpoint loop now also drains an index-record
+  worklist after each iteration when tracking is on.
+- `src/functions/rdf_owl_rl/rules.rs` — adds tracked variants
+  for the five core derivation rules alongside their existing
+  un-tracked siblings. Other 55 rules carry `apply_tracked: None`.
+- `src/functions/rdf_dred.rs` — the new SQL scalar.
+- 9 new integration tests under `// ── 0.12.0 rdf_dred_overdelete ──`.
+
+### Out of scope (revisit on consumer signal)
+
+- Tracking the remaining 55 OWL 2 RL rules from 0.10.0.
+- `rdf_construct_many` → index write-through (would let SHACL
+  Rules materialisations participate in DRed).
+- Cross-process / cross-restart index persistence (ties to
+  the deferred RocksDB plan).
+- A combined `rdf_dred_step(inferred, retracted_premises) →
+  INTEGER` that fuses overdelete + re-materialise — the
+  primitives stay composable until a consumer asks for ergonomics.
+
 ## 0.11.0 — Native SHACL Core validator pass
 
 `rdf_shacl_core_validate(data_iri, shapes_iri, report_iri,
