@@ -1710,15 +1710,19 @@ mod tests {
             [],
             |r| r.get(0),
         )?;
-        assert_eq!(delta, 1, "scm-sco derives :A ⊑ :C; got delta {delta}");
+        // The specific :A ⊑ :C derivation is checked below; the exact delta
+        // depends on which axiomatic rules (cls-thing / cls-nothing1 /
+        // scm-cls on those) also fire in 0.10.0+, so pin the lower bound
+        // rather than an exact match.
+        assert!(delta >= 1, "scm-sco derives :A ⊑ :C; got delta {delta}");
 
-        // The derived triple is in urn:g:inferred, not the default graph.
+        // Derivations land in urn:g:inferred, not the default graph.
         let inferred_count: i64 = conn.query_row(
             "SELECT rdf_count('urn:g:inferred')",
             [],
             |r| r.get(0),
         )?;
-        assert_eq!(inferred_count, 1);
+        assert!(inferred_count >= 1, "expected ≥1 inferred quad; got {inferred_count}");
 
         // Verify the specific derived triple.
         let constructed: String = conn.query_row(
@@ -2014,6 +2018,284 @@ mod tests {
             let present: i64 =
                 conn.query_row("SELECT sparql_ask(?)", [*ask], |r| r.get(0))?;
             assert_eq!(present, 1, "expected derived triple missing for ASK: {ask}");
+        }
+        Ok(())
+    }
+
+    // ── 0.10.0 Phase D — equality-saturation opt-out ───────────────────────
+
+    /// `equality_saturation: false` short-circuits eq-rep-s/p/o. The
+    /// substituted triple `:b :p :o` (from `:a owl:sameAs :b` + `:a :p :o`)
+    /// must NOT appear in the inferred graph.
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_equality_saturation_disabled() -> Result<()> {
+        let conn = open_with_extension()?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle(?)",
+            [r#"
+                @prefix : <http://e/> .
+                @prefix owl: <http://www.w3.org/2002/07/owl#> .
+                :a owl:sameAs :b .
+                :a :p :o .
+            "#],
+            |r| r.get(0),
+        )?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', \
+             '{\"equality_saturation\": false}')",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let substituted: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> { <http://e/b> <http://e/p> <http://e/o> } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(substituted, 0, "eq-rep-s must NOT fire when equality_saturation=false");
+
+        // eq-sym still fires; the reverse sameAs lands in the inferred graph.
+        let eq_sym: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> { <http://e/b>
+                <http://www.w3.org/2002/07/owl#sameAs> <http://e/a> } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(eq_sym, 1, "eq-sym must still fire regardless of equality_saturation");
+        Ok(())
+    }
+
+    /// `equality_saturation: true` (the default) does the substitution.
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_equality_saturation_default_substitutes() -> Result<()> {
+        let conn = open_with_extension()?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle(?)",
+            [r#"
+                @prefix : <http://e/> .
+                @prefix owl: <http://www.w3.org/2002/07/owl#> .
+                :a owl:sameAs :b .
+                :a :p :o .
+            "#],
+            |r| r.get(0),
+        )?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let substituted: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> { <http://e/b> <http://e/p> <http://e/o> } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(substituted, 1, "eq-rep-s must fire by default");
+        Ok(())
+    }
+
+    // ── 0.10.0 Phase F — full-stack composition tests for Phase B/C/D/E rules ─
+
+    /// cls-int1 + cls-int2 round-trip: an instance typed under an
+    /// intersection class decomposes into each member class (cls-int2);
+    /// an instance typed under every member class reconstitutes as the
+    /// intersection (cls-int1).
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_intersection_round_trip() -> Result<()> {
+        let conn = open_with_extension()?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle(?)",
+            [r#"
+                @prefix : <http://e/> .
+                @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+                @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+                :HappyVegetarian owl:intersectionOf ( :Happy :Vegetarian ) .
+                :alice a :HappyVegetarian .
+                :bob a :Happy ;
+                     a :Vegetarian .
+            "#],
+            |r| r.get(0),
+        )?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        // cls-int2 derivations from alice.
+        let alice_happy: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> {
+                  <http://e/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://e/Happy>
+                } }"#],
+            |r| r.get(0),
+        )?;
+        let alice_veg: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> {
+                  <http://e/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://e/Vegetarian>
+                } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(alice_happy, 1, "cls-int2: alice should be Happy");
+        assert_eq!(alice_veg, 1, "cls-int2: alice should be Vegetarian");
+        // cls-int1 derivation for bob.
+        let bob_hv: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> {
+                  <http://e/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://e/HappyVegetarian>
+                } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(bob_hv, 1, "cls-int1: bob should be HappyVegetarian");
+        Ok(())
+    }
+
+    /// prp-spo2 property chain — uncle = parent ∘ sibling. Alice's parent
+    /// is Bob; Bob's sibling is Carol → Carol is Alice's uncle.
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_property_chain_uncle() -> Result<()> {
+        let conn = open_with_extension()?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle(?)",
+            [r#"
+                @prefix : <http://e/> .
+                @prefix owl: <http://www.w3.org/2002/07/owl#> .
+                :uncle owl:propertyChainAxiom ( :parent :sibling ) .
+                :alice :parent :bob .
+                :bob :sibling :carol .
+            "#],
+            |r| r.get(0),
+        )?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        let derived: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> {
+                  <http://e/alice> <http://e/uncle> <http://e/carol>
+                } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(derived, 1, "prp-spo2: alice should have carol as uncle");
+        Ok(())
+    }
+
+    /// prp-key + equality_saturation: shared (givenName, familyName) key
+    /// collapses two records into one identity. Then eq-rep-s propagates
+    /// each record's predicates onto the other.
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_has_key_resolves_duplicates() -> Result<()> {
+        let conn = open_with_extension()?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle(?)",
+            [r#"
+                @prefix : <http://e/> .
+                @prefix owl: <http://www.w3.org/2002/07/owl#> .
+                :Person owl:hasKey ( :given :family ) .
+                :p1 a :Person ;
+                    :given "Alice" ;
+                    :family "Smith" ;
+                    :age 30 .
+                :p2 a :Person ;
+                    :given "Alice" ;
+                    :family "Smith" ;
+                    :email "alice@example.org" .
+            "#],
+            |r| r.get(0),
+        )?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        let same_as: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> {
+                  <http://e/p1> <http://www.w3.org/2002/07/owl#sameAs> <http://e/p2>
+                } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(same_as, 1, "prp-key: p1 ≡ p2 from shared (given, family)");
+        // eq-rep-s should propagate p1's :age onto p2.
+        let p2_age: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> { <http://e/p2> <http://e/age> 30 } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(p2_age, 1, "eq-rep-s: p2 should inherit p1's :age");
+        Ok(())
+    }
+
+    /// prp-ifp + eq-rep-s — two subjects sharing an inverse-functional
+    /// property value collapse, and their other predicates merge.
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_inverse_functional_property_collapses() -> Result<()> {
+        let conn = open_with_extension()?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle(?)",
+            [r#"
+                @prefix : <http://e/> .
+                @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+                @prefix owl: <http://www.w3.org/2002/07/owl#> .
+                :email a owl:InverseFunctionalProperty .
+                :alice :email "alice@e.org" ;
+                       :role :admin .
+                :al :email "alice@e.org" ;
+                    :nickname "Al" .
+            "#],
+            |r| r.get(0),
+        )?;
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        let merged: i64 = conn.query_row(
+            "SELECT sparql_ask(?)",
+            [r#"ASK { GRAPH <urn:g:inferred> {
+                  <http://e/alice> <http://www.w3.org/2002/07/owl#sameAs> <http://e/al>
+                } }"#],
+            |r| r.get(0),
+        )?;
+        assert_eq!(merged, 1, "prp-ifp: alice ≡ al from shared :email value");
+        Ok(())
+    }
+
+    /// dt-type1 axioms must land in the inferred graph. Picks two
+    /// well-known XSD datatypes as a sample of the full list.
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_materialise_dt_type1_emits_xsd_axioms() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Empty input — dt-type1 fires axiomatically regardless of contents.
+        let _: i64 = conn.query_row(
+            "SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        for dt in &[
+            "http://www.w3.org/2001/XMLSchema#integer",
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/2001/XMLSchema#dateTime",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
+        ] {
+            let ask = format!(
+                r#"ASK {{ GRAPH <urn:g:inferred> {{
+                    <{dt}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+                           <http://www.w3.org/2000/01/rdf-schema#Datatype>
+                }} }}"#
+            );
+            let present: i64 =
+                conn.query_row("SELECT sparql_ask(?)", [ask.as_str()], |r| r.get(0))?;
+            assert_eq!(present, 1, "dt-type1 must emit axiom for {dt}");
         }
         Ok(())
     }

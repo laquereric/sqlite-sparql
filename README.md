@@ -207,7 +207,7 @@ blob lands. Pre-flight: any parse error aborts the whole batch
 with the prefix `SPARQL parse error (query index N):` before any
 query evaluates.
 
-### OWL 2 RL native reasoning (since 0.9.0)
+### OWL 2 RL native reasoning (since 0.9.0; full derivation coverage since 0.10.0)
 
 For fixpoint reasoning workloads (OWL 2 RL closures), `rdf_owl_rl_materialise`
 runs a native Rust fixpoint loop in one FFI crossing in place of the
@@ -217,19 +217,36 @@ gem-side per-rule `sparql_update` round-trip:
 SELECT rdf_owl_rl_materialise(
   NULL,                       -- asserted graph (NULL = default)
   'urn:g:catalogue:inferred', -- inferred graph (must be a named graph)
-  json('{"max_iterations": 50, "provenance": true}')
+  json('{"max_iterations": 50, "provenance": true,
+         "equality_saturation": true, "eq_reflexive": false}')
 );
 -- => INTEGER (signed net delta in store size)
 ```
 
-0.9.0 ships parity with `vv-graph`'s `Vv::Graph::Reasoner::Rules::OwlRl`
-— 15 rules from the W3C OWL 2 RL/RDF rule table covering T-Box
-transitive closures (`scm-sco`, `scm-spo`, `scm-eqc1`, `scm-eqp1`),
-A-Box propagation (`cax-sco`, `prp-spo1`), domain/range
-(`prp-dom`, `prp-rng`), property characteristics (`prp-trp`,
-`prp-symp`, `prp-inv1`, `prp-inv2`, `prp-fp`), and sameAs closure
-(`eq-sym`, `eq-trans`). The remaining ~55 W3C OWL 2 RL rules
-land in 0.10.0.
+**0.10.0 ships the full W3C OWL 2 RL/RDF derivation rule set — 60
+rules across Scm / Cls / Cax / Prp / Eq / Dt tables.** The
+*inconsistency*-detecting rules (~15 W3C rules that conclude
+"false" rather than derive a triple) are not in this release; a
+separate `rdf_owl_rl_consistent` surface is queued for a future
+release. See `docs/plans/PLAN_0.10.0.md` § "Inconsistency rules —
+deferred to a separate surface" for the rationale.
+
+Two new options on top of 0.9.0's:
+
+- `equality_saturation` (default `true`) — short-circuits `eq-rep-s` /
+  `eq-rep-p` / `eq-rep-o` when `false`, for graphs with heavy
+  `owl:sameAs` linkage that would otherwise blow up the closure.
+- `eq_reflexive` (default `false`) — opt-in for `eq-ref` (reflexive
+  `?term owl:sameAs ?term` for every term in every quad). Off by
+  default because `eq-ref` + `provenance: true` doesn't converge —
+  annotation triples contain new quoted-triple terms that the rule
+  itself then derives reflexives for, ad infinitum within the
+  iteration cap.
+
+Two `Dt` rules (`dt-eq`, `dt-diff`) ship as functional no-ops
+because Oxigraph 0.4's model rejects literals in subject position;
+they revive once the model upgrades. The remaining 58 derivation
+rules fire fully.
 
 With `"provenance": true`, every derived triple is annotated with
 two RDF-star quads (since 0.7.0):
@@ -451,9 +468,10 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] RDF-star / SPARQL-star round-trip — landed in 0.7.0
 - [x] Batched CONSTRUCT (`rdf_construct_many`) — landed in 0.8.0
 - [x] Native OWL 2 RL fixpoint pass (15-rule subset) — landed in 0.9.0
-- [ ] Full OWL 2 RL coverage (remaining ~55 rules) — PLAN_0.10.0
+- [x] Full OWL 2 RL derivation coverage (60 rules) — landed in 0.10.0
 - [ ] Native SHACL Core validator pass — PLAN_0.11.0 (VG CR #7)
 - [ ] Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
+- [ ] OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) — future
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails
 - [ ] Persistent store via Oxigraph's RocksDB backend — *deferred,

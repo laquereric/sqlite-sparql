@@ -187,11 +187,14 @@ required:
   per-query N-Triples blobs. vv-graph driver (`Shacl::Rules.materialise!`
   fixpoint loop); no MM call site today.
 - `rdf_owl_rl_materialise(asserted, inferred, options_json) → INTEGER`
-  (from 0.9.0) — native Rust fixpoint loop applying a 15-rule OWL 2
-  RL subset; emits RDF-star `prov:wasDerivedFrom` annotations on
+  (from 0.9.0; full derivation coverage from 0.10.0) — native Rust
+  fixpoint loop applying the full W3C OWL 2 RL/RDF derivation rule
+  set (60 rules across Scm / Cls / Cax / Prp / Eq / Dt as of 0.10.0;
+  inconsistency rules defer to a future `rdf_owl_rl_consistent`
+  surface). Emits RDF-star `prov:wasDerivedFrom` annotations on
   every derived triple when `provenance: true`. vv-graph driver
   (`Vv::Graph::Reasoner.materialise!` would route through this once
-  the gem floor bumps to engine ≥ 0.9.0); no MM call site today.
+  the gem floor bumps to engine ≥ 0.10.0); no MM call site today.
 
 ## Behaviours MM does NOT depend on
 

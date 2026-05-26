@@ -34,7 +34,8 @@ sqlite-sparql/
 │   │   ├── sparql_query.rs     # sparql_query/ask/construct/update + construct_many
 │   │   ├── rdf_owl_rl.rs       # rdf_owl_rl_materialise — fixpoint loop + provenance (0.9.0)
 │   │   └── rdf_owl_rl/
-│   │       └── rules.rs        # 15-rule OWL 2 RL library
+│   │       ├── rdf_lists.rs    # rdf:first / rdf:rest list walker (0.10.0)
+│   │       └── rules.rs        # 60-rule OWL 2 RL library (15 in 0.9.0, +45 in 0.10.0)
 │   └── vtab/
 │       ├── mod.rs
 │       └── triples_vtab.rs     # rdf_triples virtual table (read/write)
@@ -139,19 +140,31 @@ read-only — the engine does not write results into the store.
 Driver: RS PLAN_0.12.0's Shacl Rules materialise loop. See
 `docs/plans/PLAN_0.8.0.md`.
 
-### 6. Native OWL 2 RL reasoning (15-rule subset) — DONE in 0.9.0
+### 6. Native OWL 2 RL reasoning — DONE (15-rule subset in 0.9.0; full
+###    derivation coverage in 0.10.0)
 `rdf_owl_rl_materialise(asserted, inferred, options_json) → INTEGER`
-runs a native Rust fixpoint loop over Oxigraph's store, applying 15
-W3C OWL 2 RL/RDF rules (parity with `vv-graph`'s
-`Vv::Graph::Reasoner::Rules::OwlRl`). With `provenance: true`,
-emits `<< s p o >> prov:wasDerivedFrom <rule_iri>` +
+runs a native Rust fixpoint loop over Oxigraph's store. 0.10.0 ships
+all 60 W3C OWL 2 RL/RDF *derivation* rules across Scm / Cls / Cax /
+Prp / Eq / Dt (matching `vv-graph`'s expanded
+`Vv::Graph::Reasoner::Rules::OwlRl` if/when the gem graduates its
+`PHASE_B_PENDING` list). With `provenance: true`, emits
+`<< s p o >> prov:wasDerivedFrom <rule_iri>` +
 `prov:generatedAtTime "..."^^xsd:dateTime` RDF-star annotations
-(predicates operator-overridable). Driver: VG CR #6. See
-`docs/plans/PLAN_0.9.0.md` and `src/functions/rdf_owl_rl/`.
+(predicates operator-overridable). New 0.10.0 options:
+`equality_saturation` (default `true`) gates `eq-rep-s/p/o`;
+`eq_reflexive` (default **`false`** — opt-in) gates `eq-ref` which
+doesn't converge under `provenance: true`. `dt-eq` / `dt-diff` are
+no-ops in Oxigraph 0.4 (literal subjects not representable).
+Driver: VG CR #6. See `docs/plans/PLAN_0.9.0.md`,
+`docs/plans/PLAN_0.10.0.md`, and `src/functions/rdf_owl_rl/`.
 
-### 7. Full OWL 2 RL coverage (remaining ~55 rules) — PLAN_0.10.0
-Expand the rule library beyond the 15-rule subset. Mechanical
-transcription; the surface + fixpoint plumbing land in 0.9.0.
+### 7. OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) — DEFERRED
+The ~15 W3C "false"-deriving rules (`prp-irp`, `cax-dw`, `cls-com`,
+`eq-diff*`, `dt-not-type`, etc.) sit outside
+`rdf_owl_rl_materialise`'s monotonic fixpoint contract. Future
+release will ship a separate scalar returning a JSON array of
+violation records, paralleling SHACL's `sh:ValidationReport`
+shape. No consumer signal yet.
 
 ### 8. Native SHACL Core validator pass — PLAN_0.11.0 (VG CR #7)
 A native Rust pass that evaluates SHACL Core constraints against a
@@ -251,17 +264,20 @@ SELECT rdf_construct_many(json('[
 -- Non-CONSTRUCT queries error with "rdf_construct_many: query index N is not a CONSTRUCT".
 ```
 
-### Reasoning (since 0.9.0)
+### Reasoning (since 0.9.0; full derivation coverage since 0.10.0)
 
 ```sql
--- Native OWL 2 RL fixpoint pass — 15-rule subset matching vv-graph's
--- Vv::Graph::Reasoner::Rules::OwlRl coverage. asserted_iri = NULL
--- means the default graph; inferred_iri must be a named graph
--- (NULL is rejected so derived triples can't pollute the default).
+-- Native OWL 2 RL fixpoint pass. 0.10.0 ships the full W3C derivation
+-- rule set (60 rules across Scm / Cls / Cax / Prp / Eq / Dt). The
+-- inconsistency-detecting rules are deferred to a future
+-- rdf_owl_rl_consistent surface (no consumer signal today).
+-- asserted_iri = NULL means the default graph; inferred_iri must be a
+-- named graph (NULL is rejected so derived triples can't pollute default).
 SELECT rdf_owl_rl_materialise(
   NULL,                         -- asserted graph
   'urn:g:catalogue:inferred',   -- inferred graph
-  json('{"max_iterations": 50, "provenance": true}')
+  json('{"max_iterations": 50, "provenance": true,
+         "equality_saturation": true, "eq_reflexive": false}')
 );
 -- => INTEGER (signed net delta in store size)
 --
@@ -271,16 +287,25 @@ SELECT rdf_owl_rl_materialise(
 --   << <s> <p> <o> >> prov:generatedAtTime "2026-05-25T20:02:43Z"^^xsd:dateTime
 --
 -- Options (all optional, defaults match vv-graph's Reasoner convention):
---   max_iterations  : int   (default 50)
---   provenance      : bool  (default false)
---   derived_by_iri  : str   (default "http://www.w3.org/ns/prov#wasDerivedFrom")
---   derived_at_iri  : str   (default "http://www.w3.org/ns/prov#generatedAtTime")
---   rule_iri_prefix : str   (default "urn:semantica:rule:")
+--   max_iterations      : int   (default 50)
+--   provenance          : bool  (default false)
+--   derived_by_iri      : str   (default "http://www.w3.org/ns/prov#wasDerivedFrom")
+--   derived_at_iri      : str   (default "http://www.w3.org/ns/prov#generatedAtTime")
+--   rule_iri_prefix     : str   (default "urn:semantica:rule:")
+--   equality_saturation : bool  (default true)  — 0.10.0; gates eq-rep-s/p/o
+--   eq_reflexive        : bool  (default false) — 0.10.0; gates eq-ref
+--                                                 (off by default — non-convergent
+--                                                  under provenance: true)
 --
 -- Error envelopes (fixed-prefix for consumer pattern-matching):
 --   "rdf_owl_rl_materialise: inferred_iri must be a named graph …"
 --   "rdf_owl_rl_materialise: fixpoint not reached after N iterations"
 --   "rdf_owl_rl_materialise: rule <id> error at iteration N: …"
+--
+-- 0.10.0 limitations:
+--   dt-eq / dt-diff currently emit nothing (Oxigraph 0.4's Subject
+--     enum has no Literal variant; the W3C rule emits literal-subject
+--     sameAs / differentFrom triples which can't be constructed).
 ```
 
 ### Virtual Table

@@ -124,7 +124,7 @@ graph-routing assumptions break too — coordinate.
 | `sparql_construct(query TEXT) → TEXT` | `Vv::Graph::Sparql.construct(query)` | Returns N-Triples-formatted text. Vv::Graph passes through unchanged. |
 | `rdf_construct_many(queries_json TEXT) → TEXT` (from 0.8.0) | `Vv::Graph::Shacl::Rules.materialise!` (once Vv::Graph PLAN_0.12.0 routes through it) | `queries_json` is a JSON array of CONSTRUCT query strings. Returns a JSON array of the same length where the `i`-th element is the N-Triples output of the `i`-th query. Per-query attribution preserved so Vv::Graph can attach `:derivedBy <rule_iri>` annotations rule-by-rule. CONSTRUCT stays read-only — engine does not insert results into the store. Errors: parse failures abort the whole batch with `SPARQL parse error (query index N): …`; non-CONSTRUCT queries error with `rdf_construct_many: query index N is not a CONSTRUCT`; non-array JSON with `rdf_construct_many: expected JSON array of query strings`. |
 | `sparql_update(query TEXT) → INTEGER` (from 0.5.0) | `Vv::Graph::Sparql.execute(any_update)` | Runs any SPARQL 1.1 UPDATE form. Returns **signed net delta** in store size (`+N` insert / `-N` delete / `inserts - deletes` for mixed). Errors split into `SPARQL parse error: …` and `SPARQL evaluation error: …` prefixes; Vv::Graph pattern-matches the prefix for its refusal envelopes. |
-| `rdf_owl_rl_materialise(asserted TEXT, inferred TEXT, options TEXT) → INTEGER` (from 0.9.0) | `Vv::Graph::Reasoner.materialise!` (once Vv::Graph PLAN bumps engine floor to ≥ 0.9.0 and routes through it) | Native Rust fixpoint loop over a 15-rule OWL 2 RL subset matching `Reasoner::Rules::OwlRl` exactly. `asserted = NULL` → default graph; `inferred = NULL` is rejected. `options_json` controls `max_iterations` (default 50), `provenance` (default false), and the three provenance-predicate-IRI overrides (defaults: `prov:wasDerivedFrom`, `prov:generatedAtTime`, prefix `urn:semantica:rule:` — chosen to match `Reasoner::Rules` so the engine + gem produce identical inferred graphs). Return is signed net delta in store size (same convention as `sparql_update`). Errors: `rdf_owl_rl_materialise: fixpoint not reached after N iterations` / `rdf_owl_rl_materialise: rule <id> error at iteration N: …` / `rdf_owl_rl_materialise: inferred_iri must be a named graph …`. The remaining ~55 W3C OWL 2 RL rules land in engine 0.10.0; Vv::Graph callers using out-of-subset constructs (`owl:intersectionOf`, `owl:unionOf`, `owl:hasKey`, etc.) stay on the per-rule `sparql_update` path until then. |
+| `rdf_owl_rl_materialise(asserted TEXT, inferred TEXT, options TEXT) → INTEGER` (from 0.9.0; full derivation coverage from 0.10.0) | `Vv::Graph::Reasoner.materialise!` (once Vv::Graph PLAN bumps engine floor to ≥ 0.10.0 and routes through it) | Native Rust fixpoint loop over the full W3C OWL 2 RL/RDF **derivation** rule set — 60 rules across Scm / Cls / Cax / Prp / Eq / Dt as of 0.10.0 (was 15-rule subset in 0.9.0). `asserted = NULL` → default graph; `inferred = NULL` is rejected. `options_json` controls `max_iterations` (default 50), `provenance` (default false), the three provenance-predicate-IRI overrides (defaults: `prov:wasDerivedFrom`, `prov:generatedAtTime`, prefix `urn:semantica:rule:` — match `Reasoner::Rules` so engine + gem produce identical inferred graphs), plus two 0.10.0 additions: `equality_saturation` (default `true`, gates `eq-rep-s/p/o`) and `eq_reflexive` (default **`false`**, gates `eq-ref` which doesn't converge under `provenance: true` — see PLAN_0.10.0.md). Return is signed net delta in store size (same convention as `sparql_update`). Errors: `rdf_owl_rl_materialise: fixpoint not reached after N iterations` / `rdf_owl_rl_materialise: rule <id> error at iteration N: …` / `rdf_owl_rl_materialise: inferred_iri must be a named graph …`. Two derivation rules are functional no-ops in Oxigraph 0.4: `dt-eq` / `dt-diff` (literal-subject triples not representable in the model). The ~15 W3C OWL 2 RL *inconsistency* rules (`prp-irp`, `cax-dw`, `cls-com`, `eq-diff*`, `dt-not-type`, …) defer to a future `rdf_owl_rl_consistent` surface returning a JSON violation-record array; no `Vv::Graph::Reasoner.consistent?` signal yet. |
 
 The leading/trailing quote/bracket characters in `sparql_query`'s
 bound values **matter**. Vv::Graph feeds those values back into
@@ -310,25 +310,26 @@ is in the "SPARQL querying" table above.
 > in this repo — the spec belongs here, the implementation
 > strategy belongs in this repo's plan dir.
 
-### 6. Native OWL 2 RL rule pass — LANDED (15-rule subset) in 0.9.0
+### 6. Native OWL 2 RL rule pass — LANDED (15-rule subset in 0.9.0; full derivation coverage in 0.10.0)
 
 Live as `rdf_owl_rl_materialise(asserted_iri TEXT, inferred_iri TEXT,
 options_json TEXT) → INTEGER`. See the "Reasoning" subsection above
-(or add one if not yet present) for the live contract. Two notes on
-how the landed shape differs from the original ask:
+(or the "SPARQL querying" table earlier in this doc) for the live
+contract. Three notes on how the landed shape differs from the
+original ask:
 
-- **15-rule subset, not the full ~70 W3C OWL 2 RL rule table.**
-  Coverage matches `Vv::Graph::Reasoner::Rules::OwlRl` exactly —
-  T-Box transitive closure (`scm-sco`, `scm-spo`, `scm-eqc1`,
-  `scm-eqp1`), A-Box propagation (`cax-sco`, `prp-spo1`),
-  domain/range (`prp-dom`, `prp-rng`), property characteristics
-  (`prp-trp`, `prp-symp`, `prp-inv1`, `prp-inv2`, `prp-fp`),
-  sameAs closure (`eq-sym`, `eq-trans`). The remaining ~55 rules
-  (`owl:intersectionOf`, `owl:unionOf`, `owl:hasKey`, etc.) land
-  in engine 0.10.0; Vv::Graph callers using ontologies that
-  depend on out-of-subset constructs stay on the per-rule
-  `Sparql.execute` path until then. The equivalence-with-vg test
-  in the engine's `tests/integration_test.rs` pins parity.
+- **Derivation coverage is complete in 0.10.0; inconsistency rules
+  defer.** 0.9.0 shipped the 15-rule
+  `Vv::Graph::Reasoner::Rules::OwlRl` subset; 0.10.0 expands to the
+  full W3C OWL 2 RL/RDF **derivation** rule set — 60 rules total
+  across Scm / Cls / Cax / Prp / Eq / Dt. The ~15 W3C
+  *inconsistency*-detecting rules (`prp-irp`, `cax-dw`, `cls-com`,
+  `eq-diff*`, `dt-not-type`, etc.) sit outside
+  `rdf_owl_rl_materialise`'s monotonic fixpoint contract — they
+  conclude "false" rather than derive a triple, with no quad to
+  insert. A separate `rdf_owl_rl_consistent` surface returning a
+  JSON array of violation records is queued for a future release;
+  no Vv::Graph signal today.
 - **Provenance shape defaults match Vv::Graph but are
   operator-overridable.** Predicate IRIs (`prov:wasDerivedFrom`,
   `prov:generatedAtTime`) and the rule-IRI prefix
@@ -338,9 +339,30 @@ how the landed shape differs from the original ask:
   both are run with `provenance: true`. Callers using a different
   provenance vocabulary pass `options.derived_by_iri` /
   `derived_at_iri` / `rule_iri_prefix`.
+- **Two 0.10.0-specific opt-outs.** `options.equality_saturation`
+  (default `true`) short-circuits `eq-rep-s/p/o` for graphs where
+  heavy `owl:sameAs` linkage would blow up the closure.
+  `options.eq_reflexive` (default **`false`**) gates `eq-ref`
+  because the rule does not converge under `provenance: true` —
+  every reflexive sameAs `eq-ref` derives gets two annotation
+  quads whose subjects are quoted-triple terms new to the inferred
+  graph, which `eq-ref` then derives reflexives for on the next
+  iteration. The opt-in default keeps the engine bounded; a
+  Vv::Graph caller round-tripping with a W3C-strict reasoner can
+  enable `eq_reflexive` explicitly.
 
-See `docs/plans/PLAN_0.9.0.md` for the full design rationale
-(return-shape, atomicity, the "no chrono dep" decision).
+Known limitation: `dt-eq` / `dt-diff` are functional no-ops in
+Oxigraph 0.4 (the model's `Subject` enum has no `Literal`
+variant, so the W3C-specified literal-subject `sameAs` /
+`differentFrom` quads can't be inserted). Revive when Oxigraph
+upgrades.
+
+See `docs/plans/PLAN_0.9.0.md` for the original 0.9.0 design
+rationale (return-shape, atomicity, the "no chrono dep" decision)
+and `docs/plans/PLAN_0.10.0.md` for the 0.10.0 expansion
+(scope-split rationale, equality-saturation discussion, the
+realised `eq-ref` non-convergence under provenance, the
+deferred-inconsistency follow-on plan).
 
 ### 7. Native SHACL Core validator pass
 

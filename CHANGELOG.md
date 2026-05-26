@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.10.0 — Full OWL 2 RL derivation coverage (~45 additional rules)
+
+`rdf_owl_rl_materialise`'s rule library grows from 15 to 60 rules,
+covering the W3C OWL 2 RL/RDF derivation rules across all five
+tables (Scm, Cls, Cax, Prp, Eq, Dt). Function signature, return
+shape, atomicity contract, and error envelopes from 0.9.0 are
+unchanged — this release is purely additive at the rule level.
+
+Driver: `CONSUMER_REQUIREMENT_VvGraph.md` § "Requested extensions"
+item #6, second bullet ("The remaining ~55 rules … land in engine
+0.10.0; Vv::Graph callers using ontologies that depend on
+out-of-subset constructs stay on the per-rule `Sparql.execute`
+path until then"). With this release, Vv::Graph's
+`Vv::Graph::Reasoner::Rules::PHASE_B_PENDING` has a native engine
+path; the gem can graduate its rule library on its own cadence.
+
+New rules grouped by W3C table (45 total):
+
+- **Scm — T-Box (16):** scm-cls, scm-op, scm-dp, scm-eqc2,
+  scm-eqp2, scm-dom1, scm-dom2, scm-rng1, scm-rng2, scm-hv,
+  scm-svf1, scm-svf2, scm-avf1, scm-avf2, scm-int, scm-uni.
+- **Cls — class-expression A-Box (14):** cls-thing, cls-nothing1,
+  cls-int1, cls-int2, cls-uni, cls-svf1, cls-svf2, cls-avf,
+  cls-hv1, cls-hv2, cls-maxc2, cls-maxqc3, cls-maxqc4, cls-oo.
+- **Cax — class-axiom A-Box (2):** cax-eqc1, cax-eqc2.
+- **Prp — property reasoning (5):** prp-ifp, prp-spo2
+  (property-chain composition via `owl:propertyChainAxiom`),
+  prp-eqp1, prp-eqp2, prp-key (`owl:hasKey` → sameAs with
+  cartesian-product key matching for multi-valued keys).
+- **Eq — equality (4):** eq-ref, eq-rep-s, eq-rep-p, eq-rep-o.
+- **Dt — datatype (4):** dt-type1 (closed 31-IRI W3C list of
+  XSD + RDF datatypes get `rdf:type rdfs:Datatype`), dt-type2
+  (same for consumer-defined datatypes that appear as literal
+  datatypes in the store), dt-eq, dt-diff.
+
+Two new options on `MaterialiseOptions`:
+
+- `equality_saturation: bool` — gates `eq-rep-s` / `eq-rep-p` /
+  `eq-rep-o`. **Default `true`** (W3C semantics). Set to `false`
+  to short-circuit term-substitution when a graph with heavy
+  `owl:sameAs` linkage would otherwise produce an O(N · K)
+  closure. `eq-sym` and `eq-trans` continue to fire regardless.
+- `eq_reflexive: bool` — gates `eq-ref`. **Default `false`** —
+  this is a deviation from the original PLAN_0.10.0 design, which
+  shipped `eq-ref` on by default. Phase D test runs showed
+  `eq-ref` with `provenance: true` does not converge: every
+  reflexive `?s owl:sameAs ?s` it derives gets two annotation
+  triples whose subjects are quoted-triple terms new to the
+  inferred graph, which `eq-ref` then derives reflexives for, and
+  so on — the closure runs out the 50-iteration cap. The opt-in
+  default keeps the engine bounded; consumers round-tripping
+  against a W3C-strict reasoner that expects reflexive saturation
+  enable it explicitly.
+
+Known limitations:
+
+- **`dt-eq` / `dt-diff` are no-ops in Oxigraph 0.4.** The W3C rule
+  emits `?lit1 owl:sameAs ?lit2` / `?lit1 owl:differentFrom ?lit2`
+  where both sides are literals. Oxigraph 0.4's `Subject` enum
+  has no `Literal` variant, so a literal-subject triple is
+  type-blocked at construction time. Both rule functions are
+  wired into the dispatch but return empty derivations. Revive
+  when Oxigraph upgrades the model (≥ 0.5).
+- **Inconsistency rules deferred.** The ~15 W3C "false"-deriving
+  rules (`prp-irp`, `prp-asyp`, `prp-pdw`, `prp-adp`, `prp-npa1/2`,
+  `cls-com`, `cls-nothing2`, `cls-maxc1`, `cls-maxqc1/2`,
+  `cax-dw`, `cax-adc`, `eq-diff1/2/3`, `dt-not-type`) are not in
+  this release. They detect contradictions rather than derive
+  triples, which doesn't fit `rdf_owl_rl_materialise`'s monotonic
+  fixpoint contract. A separate `rdf_owl_rl_consistent` surface
+  is queued for a future release returning a JSON array of
+  violation records.
+
+Implementation notes:
+
+- New helper module `src/functions/rdf_owl_rl/rdf_lists.rs` —
+  walks `rdf:first` / `rdf:rest` chains for the list-using rules
+  (cls-int1/2, cls-uni, cls-oo, scm-int, scm-uni, prp-spo2,
+  prp-key). Cycle-safe; rejects ambiguous / malformed lists as
+  `None` so rule bodies fail gracefully.
+- The 0.9.0 fixpoint loop, provenance emission, options blob,
+  return-shape, error envelopes, and dedup-against-inferred check
+  are all reused unchanged. Only `rules.rs` grew (and the
+  dispatch table within it).
+- `Cargo.toml` and `VERSION` bump to `0.10.0`. No new
+  external dependencies.
+
+Tests: 30 → 61 lib + 70 → 77 integration + 1 ignored, both debug
+and release. Per-rule lib smoke tests cover each derivation rule
+in isolation; 5 full-stack integration tests
+(`*_intersection_round_trip`, `*_property_chain_uncle`,
+`*_has_key_resolves_duplicates`,
+`*_inverse_functional_property_collapses`, `*_dt_type1_emits_xsd_axioms`)
+exercise the rule families through the SQL surface;
+`*_equality_saturation_disabled` and
+`*_equality_saturation_default_substitutes` pin the new option's
+contract.
+
+See `docs/plans/PLAN_0.10.0.md` for the full design (scope split
+rationale, equality-saturation discussion, the realised `eq-ref`
+non-convergence under provenance, the deferred-inconsistency
+follow-on plan).
+
 ## 0.9.0 — Native OWL 2 RL rule pass (15-rule subset)
 
 `rdf_owl_rl_materialise(asserted_iri TEXT, inferred_iri TEXT,

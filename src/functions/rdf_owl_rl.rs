@@ -4,16 +4,21 @@
 /// |-------------------------------------------------------------------|------------------------------------|
 /// | `rdf_owl_rl_materialise(asserted, inferred, options_json)`        | Signed net delta in store size     |
 ///
-/// 0.9.0 ships parity with `vv-graph`'s `Vv::Graph::Reasoner::Rules::OwlRl`
-/// — 15 W3C OWL 2 RL/RDF rules covering T-Box transitive closures
-/// (`scm-sco`, `scm-spo`, `scm-eqc1`, `scm-eqp1`), A-Box propagation
-/// (`cax-sco`, `prp-spo1`), domain/range (`prp-dom`, `prp-rng`),
-/// property characteristics (`prp-trp`, `prp-symp`, `prp-inv1`,
-/// `prp-inv2`, `prp-fp`), and sameAs closure (`eq-sym`, `eq-trans`).
-/// The remaining ~55 W3C OWL 2 RL rules are deferred to PLAN_0.10.0.
+/// 0.9.0 shipped the 15-rule subset matching `vv-graph`'s
+/// `Vv::Graph::Reasoner::Rules::OwlRl`. **0.10.0 expands to the full
+/// W3C OWL 2 RL/RDF derivation rule set — 60 rules across
+/// Scm / Cls / Cax / Prp / Eq / Dt.** Two new options:
+/// `equality_saturation` (default `true`) gates `eq-rep-s/p/o`;
+/// `eq_reflexive` (default `false` — opt-in) gates `eq-ref` which
+/// doesn't converge under `provenance: true`. `dt-eq` / `dt-diff`
+/// are no-ops in Oxigraph 0.4 (literal-subject triples not
+/// representable). The ~15 W3C inconsistency rules defer to a
+/// future `rdf_owl_rl_consistent` surface.
 ///
-/// See `docs/plans/PLAN_0.9.0.md` for the full design (return-shape
-/// rationale, provenance contract, atomicity).
+/// See `docs/plans/PLAN_0.9.0.md` and `docs/plans/PLAN_0.10.0.md`
+/// for the full design (return-shape, provenance, atomicity,
+/// the realised `eq-ref` non-convergence, the deferred-inconsistency
+/// follow-on plan).
 use oxigraph::model::{GraphName, Literal, NamedNode, Quad, Subject, Term, Triple};
 use serde::Deserialize;
 use sqlite_loadable::api::ValueType;
@@ -22,6 +27,7 @@ use sqlite_loadable::{api, define_scalar_function, prelude::*, Error, FunctionFl
 use crate::error::SparqlError;
 use crate::store::{parse_graph_name, with_store};
 
+pub(crate) mod rdf_lists;
 pub(crate) mod rules;
 
 /// Materialisation options. All fields optional; defaults match
@@ -39,6 +45,23 @@ pub(crate) struct MaterialiseOptions {
     pub derived_at_iri: String,
     #[serde(default = "default_rule_prefix")]
     pub rule_iri_prefix: String,
+    /// Phase D `eq-rep-s` / `eq-rep-p` / `eq-rep-o` toggle. Default `true`
+    /// (W3C OWL 2 RL semantics). Set to `false` to short-circuit the three
+    /// term-substitution rules when a graph with heavy `owl:sameAs` linkage
+    /// would otherwise blow up the closure (O(N · K) in the worst case).
+    /// `eq-sym`, `eq-trans` continue to fire regardless.
+    #[serde(default = "default_equality_saturation")]
+    pub equality_saturation: bool,
+    /// Phase D `eq-ref` toggle. Default `false`. The W3C rule says every
+    /// term appearing in any quad position derives a reflexive `owl:sameAs`;
+    /// combined with `provenance: true`, the annotations on those reflexive
+    /// derivations themselves contain new quoted-triple terms, which `eq-ref`
+    /// then derives further reflexives for — the closure does not converge
+    /// in practice. Leaving `eq-ref` opt-in keeps the inferred graph
+    /// bounded; enable explicitly when round-tripping with a W3C-strict
+    /// reasoner that expects the reflexive saturation.
+    #[serde(default)]
+    pub eq_reflexive: bool,
 }
 
 fn default_max_iterations() -> usize {
@@ -52,6 +75,9 @@ fn default_derived_at() -> String {
 }
 fn default_rule_prefix() -> String {
     "urn:semantica:rule:".to_string()
+}
+fn default_equality_saturation() -> bool {
+    true
 }
 
 /// `rdf_owl_rl_materialise(asserted_iri TEXT, inferred_iri TEXT, options_json TEXT) → INTEGER`.
@@ -138,6 +164,14 @@ fn execute_materialise(
             let now = now_rfc3339();
             let mut new_quads: Vec<Quad> = Vec::new();
             for rule in rules::RULES {
+                if !opts.equality_saturation
+                    && rules::EQ_REP_RULE_IRIS.contains(&rule.iri)
+                {
+                    continue;
+                }
+                if !opts.eq_reflexive && rule.iri == rules::EQ_REF_RULE_IRI {
+                    continue;
+                }
                 let derived = (rule.apply)(store, &asserted_g, &inferred_g).map_err(|e| {
                     SparqlError::EvalError(format!(
                         "rdf_owl_rl_materialise: rule {} error at iteration {iteration}: {e}",
