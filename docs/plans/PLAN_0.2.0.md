@@ -173,9 +173,14 @@ roadmap looks like:
 | 0.6.0 | Graph-scoped bulk loading (`rdf_load_*_to_graph`) | `PLAN_0.6.0.md` |
 | 0.7.0 | RDF-star / SPARQL-star round-trip | `PLAN_0.7.0.md` |
 | 0.8.0 | Batched CONSTRUCT (`rdf_construct_many`) | `PLAN_0.8.0.md` |
-| 0.9.0 | `sqlite-sparql-ruby` gem wrapper | (future) |
-| 0.10.0 | SPARQL HTTP endpoint | (future) |
+| 0.9.0 | Native OWL 2 RL pass (15-rule subset) | `PLAN_0.9.0.md` |
+| 0.10.0 | Full OWL 2 RL coverage (remaining ~55 rules) | (future) |
+| 0.11.0 | Native SHACL Core validator (VG CR #7) | (future) |
+| 0.12.0 | Native DRed dependency index (VG CR #8) | (future) |
+| 0.13.0 | `sqlite-sparql-ruby` gem wrapper | (future) |
+| 0.14.0 | SPARQL HTTP endpoint | (future) |
 | Deferred | Persistent RocksDB backend via `rdf_open(path)` | revive on first consumer ask |
+| Deferred | Differential dataflow at store layer (VG CR #10) | out-of-reach for incremental engine work |
 
 Do not edit `CHANGELOG.md`'s historical 0.1.0 entry — its
 future-roadmap mentions were accurate *as of the 0.1.0 release* and

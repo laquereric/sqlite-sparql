@@ -30,7 +30,11 @@ sqlite-sparql/
 │   ├── functions/
 │   │   ├── mod.rs
 │   │   ├── rdf_triple.rs       # rdf_insert/delete/clear/count/load/dump
-│   │   └── sparql_query.rs     # sparql_query/ask/construct
+│   │   ├── rdf_bulk.rs         # rdf_insert_many / rdf_delete_many (0.4.0)
+│   │   ├── sparql_query.rs     # sparql_query/ask/construct/update + construct_many
+│   │   ├── rdf_owl_rl.rs       # rdf_owl_rl_materialise — fixpoint loop + provenance (0.9.0)
+│   │   └── rdf_owl_rl/
+│   │       └── rules.rs        # 15-rule OWL 2 RL library
 │   └── vtab/
 │       ├── mod.rs
 │       └── triples_vtab.rs     # rdf_triples virtual table (read/write)
@@ -135,22 +139,53 @@ read-only — the engine does not write results into the store.
 Driver: RS PLAN_0.12.0's Shacl Rules materialise loop. See
 `docs/plans/PLAN_0.8.0.md`.
 
-### 6. Persistent Store (RocksDB backend) — DEFERRED
+### 6. Native OWL 2 RL reasoning (15-rule subset) — DONE in 0.9.0
+`rdf_owl_rl_materialise(asserted, inferred, options_json) → INTEGER`
+runs a native Rust fixpoint loop over Oxigraph's store, applying 15
+W3C OWL 2 RL/RDF rules (parity with `vv-graph`'s
+`Vv::Graph::Reasoner::Rules::OwlRl`). With `provenance: true`,
+emits `<< s p o >> prov:wasDerivedFrom <rule_iri>` +
+`prov:generatedAtTime "..."^^xsd:dateTime` RDF-star annotations
+(predicates operator-overridable). Driver: VG CR #6. See
+`docs/plans/PLAN_0.9.0.md` and `src/functions/rdf_owl_rl/`.
+
+### 7. Full OWL 2 RL coverage (remaining ~55 rules) — PLAN_0.10.0
+Expand the rule library beyond the 15-rule subset. Mechanical
+transcription; the surface + fixpoint plumbing land in 0.9.0.
+
+### 8. Native SHACL Core validator pass — PLAN_0.11.0 (VG CR #7)
+A native Rust pass that evaluates SHACL Core constraints against a
+data graph and emits a W3C-conformant `sh:ValidationReport` graph
+in one FFI crossing. Substantial — ~30 constraint components plus
+path-expression evaluation.
+
+### 9. Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
+A side-table mapping inferred-triple IDs to their premise triple IDs,
+maintained as a write-through during `rdf_owl_rl_materialise`. Powers
+DRed's over-deletion phase without pattern-matching against
+`:derivedFrom` RDF-star annotations.
+
+### 10. Persistent Store (RocksDB backend) — DEFERRED
 No consumer asks for persistence. If it lands, replace the in-memory
 `Store::new()` in `store.rs` with `Store::open(path)` (Oxigraph's
 RocksDB-backed persistent store) and expose the path via a
 `rdf_open(path TEXT)` SQL function or an extension argument. Revive
 on first consumer ask.
 
-### 7. Rails Gem Wrapper (`sqlite-sparql-ruby`)
+### 11. Rails Gem Wrapper (`sqlite-sparql-ruby`)
 Create a companion Ruby gem that:
 - Ships the pre-compiled `.dylib`/`.so` for common platforms
 - Exposes a `SqliteSparql.load(db)` method (mirroring `sqlite-vec`'s pattern)
 - Provides an ActiveRecord concern `HasRdfTriples` for model-level helpers
 
-### 8. SPARQL Endpoint Middleware
+### 12. SPARQL Endpoint Middleware
 Add a Rack/Rails middleware that exposes a `/sparql` HTTP endpoint accepting
 SPARQL queries over the wire (SPARQL Protocol 1.1).
+
+### 13. Differential dataflow at the store layer — DEFERRED
+VG CR #10. Explicitly flagged "genuinely out-of-reach for incremental
+engine work" in the VG CR. Revive only if MM signals a workload that
+can't be served by items #6 + #9 combined.
 
 ---
 
@@ -214,6 +249,38 @@ SELECT rdf_construct_many(json('[
 -- Pre-flight: any parse error aborts the batch with
 -- "SPARQL parse error (query index N): …" before any query evaluates.
 -- Non-CONSTRUCT queries error with "rdf_construct_many: query index N is not a CONSTRUCT".
+```
+
+### Reasoning (since 0.9.0)
+
+```sql
+-- Native OWL 2 RL fixpoint pass — 15-rule subset matching vv-graph's
+-- Vv::Graph::Reasoner::Rules::OwlRl coverage. asserted_iri = NULL
+-- means the default graph; inferred_iri must be a named graph
+-- (NULL is rejected so derived triples can't pollute the default).
+SELECT rdf_owl_rl_materialise(
+  NULL,                         -- asserted graph
+  'urn:g:catalogue:inferred',   -- inferred graph
+  json('{"max_iterations": 50, "provenance": true}')
+);
+-- => INTEGER (signed net delta in store size)
+--
+-- With provenance: true, every derived triple gets two RDF-star
+-- annotations (since 0.7.0):
+--   << <s> <p> <o> >> prov:wasDerivedFrom <urn:semantica:rule:scm-sco>
+--   << <s> <p> <o> >> prov:generatedAtTime "2026-05-25T20:02:43Z"^^xsd:dateTime
+--
+-- Options (all optional, defaults match vv-graph's Reasoner convention):
+--   max_iterations  : int   (default 50)
+--   provenance      : bool  (default false)
+--   derived_by_iri  : str   (default "http://www.w3.org/ns/prov#wasDerivedFrom")
+--   derived_at_iri  : str   (default "http://www.w3.org/ns/prov#generatedAtTime")
+--   rule_iri_prefix : str   (default "urn:semantica:rule:")
+--
+-- Error envelopes (fixed-prefix for consumer pattern-matching):
+--   "rdf_owl_rl_materialise: inferred_iri must be a named graph …"
+--   "rdf_owl_rl_materialise: fixpoint not reached after N iterations"
+--   "rdf_owl_rl_materialise: rule <id> error at iteration N: …"
 ```
 
 ### Virtual Table

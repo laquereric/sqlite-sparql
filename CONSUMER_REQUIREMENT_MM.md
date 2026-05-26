@@ -7,15 +7,20 @@ upstream changes can be checked against a written consumer expectation —
 work that needs to land in both repos lockstep.
 
 MM consumes `sqlite-sparql` **indirectly**, through the
-[`rails-semantica`](https://github.com/laquereric/rails-semantica) gem. So
-in practice, drift on this extension's surface tends to surface as failing
-specs in `rails-semantica` first, and only after that as failing specs in
-MM. Both layers care about this file.
+[`vv-graph`](https://github.com/laquereric/vv-graph) gem (renamed from
+`rails-semantica` to `vv-graph` at v0.15.0 per `PLAN_0_82_0`; the
+Ruby namespace also moved from `Semantica::*` to `Vv::Graph::*`). So in practice, drift on
+this extension's surface tends to surface as failing specs in `vv-graph`
+first, and only after that as failing specs in MM. Both layers care
+about this file.
 
 - MM repo: <https://github.com/laquereric/magentic-market-ai>
 - MM plan that introduced the dependency: `docs/plans/PLAN_0_29_1.md`
-- Intermediate consumer: `rails-semantica` (its
-  `CONSUMER_REQUIREMENT_MM.md` covers the gem-level surface)
+- MM plan that landed the rename sweep: `docs/plans/PLAN_0_82_0.md`
+- MM plan that authored this CR refresh: `docs/plans/PLAN_0_91_0.md`
+- Intermediate consumer: `vv-graph` (its
+  `CONSUMER_REQUIREMENT_VvGraph.md` — sibling of this file — covers
+  the gem-level surface)
 
 ## How MM gets the extension
 
@@ -33,12 +38,12 @@ export MM_SQLITE_SPARQL_PATH="$PWD/target/release/libsqlite_sparql.dylib"
 ```
 
 MM's `vendor/sqlite-sparql/` submodule pin is the rev of record. The pin
-is checked in CI against the rev `rails-semantica`'s `Gemfile.lock` was
+is checked in CI against the rev `vv-graph`'s `Gemfile.lock` was
 tested against, so a single bump moves both layers lockstep.
 
 ## SQL surfaces MM (indirectly) consumes
 
-MM exercises these via `Semantica::Sparql` and `Semantica::Storable`. If
+MM exercises these via `Vv::Graph::Sparql` and `Vv::Graph::Storable`. If
 the upstream renames or removes any of them, the consuming gem breaks +
 MM breaks downstream.
 
@@ -65,7 +70,7 @@ MM breaks downstream.
 ### SPARQL querying
 
 - `sparql_query(query TEXT) → TEXT` — JSON array of binding objects.
-  `Semantica::Sparql.select` parses the JSON; MM observes the parsed
+  `Vv::Graph::Sparql.select` parses the JSON; MM observes the parsed
   envelope, not the JSON shape directly. **But:** the JSON shape MM
   ultimately sees is `[{ "var": "value", ... }, ...]` where values are
   bare strings (IRIs stripped of `<>`, literals stripped of quotes). If
@@ -82,8 +87,8 @@ MM breaks downstream.
   the graph is readable/writeable when named explicitly
   (`SELECT subject, graph FROM triples`,
   `INSERT INTO triples(subject, predicate, object, graph) VALUES (…)`).
-  MM does **not** read this directly today, but `rails-semantica` may
-  use it for bulk operations; if so, it's named in `rails-semantica`'s
+  MM does **not** read this directly today, but `vv-graph` may
+  use it for bulk operations; if so, it's named in `vv-graph`'s
   consumer requirement.
 
 ### Term encoding
@@ -116,7 +121,7 @@ load. MM depends on:
   pool gets the extension loaded; the gem's Loader handles this. If the
   extension changes its thread / connection assumptions (currently
   thread-local Oxigraph store, per `CLAUDE.md`), the gem must adapt — and
-  MM must see no behavioural change at the `Semantica::Sparql` envelope.
+  MM must see no behavioural change at the `Vv::Graph::Sparql` envelope.
 - **Per-connection store isolation is acceptable for v0.29.x.** MM's V0.29.x
   scope does not require cross-connection store sharing. If upstream adds a
   shared / persistent store later, MM will adopt opportunistically.
@@ -136,7 +141,7 @@ Upstream Oxigraph features MM does NOT exercise (so version bumps that
 break them are tolerable from MM's POV but the gem must still pass its
 own specs):
 
-- SPARQL UPDATE (intentionally not exposed via `Semantica::Sparql` — MM
+- SPARQL UPDATE (intentionally not exposed via `Vv::Graph::Sparql` — MM
   mutates via `Storable` lifecycle hooks).
 - Named graph support (MM uses the default graph only).
 - RDF/XML loading (MM loads via Storable, not bulk loaders).
@@ -149,13 +154,13 @@ required:
 
 - `sparql_update(query) → INTEGER` (from 0.5.0) — arbitrary SPARQL
   1.1 UPDATE. MM mutates via `Storable` lifecycle hooks (which call
-  `rdf_insert`/`rdf_delete`), so UPDATE is unused. RS exposes it
-  through `Semantica::Sparql.execute` for the gem-level facade.
+  `rdf_insert`/`rdf_delete`), so UPDATE is unused. vv-graph exposes it
+  through `Vv::Graph::Sparql.execute` for the gem-level facade.
 - `rdf_load_ntriples_to_graph(body, graph) → INTEGER` (from 0.6.0) —
   bulk-load an N-Triples body into a named graph in one FFI call.
   MM tripler output goes through `Storable` lifecycle hooks
   (single-row `rdf_insert` or batched `rdf_insert_many`), so the
-  loader path is unused by MM. RS routes graph-tagged `INSERT DATA`
+  loader path is unused by MM. vv-graph routes graph-tagged `INSERT DATA`
   through it.
 - `rdf_load_turtle_to_graph(body, graph)` /
   `rdf_load_rdfxml_to_graph(body, graph)` (from 0.6.0) — siblings
@@ -179,8 +184,14 @@ required:
   quoted-triple terms. Conformer-adjacent; same status.
 - `rdf_construct_many(queries_json) → TEXT (JSON array)` (from
   0.8.0) — runs N CONSTRUCTs in one FFI crossing, returns
-  per-query N-Triples blobs. RS driver (`Shacl::Rules.materialise!`
+  per-query N-Triples blobs. vv-graph driver (`Shacl::Rules.materialise!`
   fixpoint loop); no MM call site today.
+- `rdf_owl_rl_materialise(asserted, inferred, options_json) → INTEGER`
+  (from 0.9.0) — native Rust fixpoint loop applying a 15-rule OWL 2
+  RL subset; emits RDF-star `prov:wasDerivedFrom` annotations on
+  every derived triple when `provenance: true`. vv-graph driver
+  (`Vv::Graph::Reasoner.materialise!` would route through this once
+  the gem floor bumps to engine ≥ 0.9.0); no MM call site today.
 
 ## Behaviours MM does NOT depend on
 
@@ -190,7 +201,7 @@ So upstream is free to change these without notifying MM:
   stays stable.
 - Internal module layout (`src/functions/`, `src/vtab/`, etc.).
 - The error enum's variant names (`SparqlError`) — MM never sees these
-  directly; the gem-level Loader maps to `Semantica::ExtensionMissing`.
+  directly; the gem-level Loader maps to `Vv::Graph::ExtensionMissing`.
 - The `examples/demo.sql` script — MM doesn't run it.
 
 ## Drift signals
@@ -198,7 +209,7 @@ So upstream is free to change these without notifying MM:
 A drift between this file and the extension's behaviour is detectable in
 these places:
 
-- `rails-semantica`'s own spec suite (gem-level Loader / Sparql specs)
+- `vv-graph`'s own spec suite (gem-level Loader / Sparql specs)
   fails first. That's the primary tripwire.
 - MM's `server/spec/integration/semantica_roundtrip_spec.rb` —
   `Product.create!` → `Sparql.select` round-trip goes red.
@@ -208,7 +219,7 @@ When drift is detected, the fix path is:
 
 1. Open an upstream PR on `sqlite-sparql` with the corrected behaviour +
    integration test coverage.
-2. Land it; bump `rails-semantica`'s pin (if the gem also changes); record
+2. Land it; bump `vv-graph`'s pin (if the gem also changes); record
    the new SHA in MM's submodule + `Gemfile.lock`.
 3. Update this file if the consumer expectation changed.
 
@@ -254,9 +265,9 @@ The upstream side of this acceptance signal is complete as of `v0.3.0`.
 The MM-side work remains:
 
 1. Bump the `sqlite-sparql` submodule SHA in MM to `v0.3.0` + the
-   matching `rails-semantica` SHA (which surfaces the graph parameter
+   matching `vv-graph` SHA (which surfaces the graph parameter
    through its Storable DSL — see
-   [`rails-semantica/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/rails-semantica/blob/main/CONSUMER_REQUIREMENT_MM.md#5-named-graph-parameter)).
+   [`vv-graph/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/vv-graph/blob/main/CONSUMER_REQUIREMENT_MM.md#5-named-graph-parameter)).
 2. Migrate the data: re-emit `ProductTripler`'s existing output into
    the `"bhphoto"` graph; delete the legacy `triples` AR table.
 3. The "Triple management" + "Virtual table" sections above already
@@ -294,17 +305,21 @@ Live surface is documented in the "Triple management" section above.
 MM-side work remaining:
 
 1. Bump the `sqlite-sparql` submodule SHA in MM to `v0.4.0` + the
-   matching `rails-semantica` SHA (which exposes a
-   `Semantica::Sparql.bulk_insert` convenience over the batched
+   matching `vv-graph` SHA (which exposes a
+   `Vv::Graph::Sparql.bulk_insert` convenience over the batched
    function — see
-   [`rails-semantica/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/rails-semantica/blob/main/CONSUMER_REQUIREMENT_MM.md#6-batched-write-convenience-sparqlbulk_insert)).
+   [`vv-graph/CONSUMER_REQUIREMENT_MM.md`](https://github.com/laquereric/vv-graph/blob/main/CONSUMER_REQUIREMENT_MM.md#6-batched-write-convenience-sparqlbulk_insert)).
 2. Rewrite the PLAN_0_29_1 Phase B.1 copy migration to call
-   `Semantica::Sparql.bulk_insert` once per ~1000-triple batch
+   `Vv::Graph::Sparql.bulk_insert` once per ~1000-triple batch
    (instead of N per-triple `INSERT DATA` calls).
-3. `Semantica::Storable`'s per-save lifecycle hook batches all
+3. `Vv::Graph::Storable`'s per-save lifecycle hook batches all
    declared predicates for a record into a single batched call.
 
 ## Contact
 
 For questions about MM's consumption pattern, see MM's
 `docs/architecture/Semantica.md` or open an issue on the MM repo.
+
+## Last reviewed
+
+2026-05-25 against MM substrate commit `e66aa9d` per `docs/plans/PLAN_0_91_0.md` (Phase A).

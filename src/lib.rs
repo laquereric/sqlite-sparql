@@ -78,6 +78,9 @@ pub fn sqlite3_sqlitesparql_init(db: *mut sqlite3) -> sqlite_loadable::Result<()
     // Register SPARQL query scalar functions
     functions::sparql_query::register(db)?;
 
+    // Register native OWL 2 RL reasoning (rdf_owl_rl_materialise)
+    functions::rdf_owl_rl::register(db)?;
+
     // Register the rdf_triples virtual table module
     vtab::triples_vtab::register(db)?;
 

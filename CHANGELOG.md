@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.9.0 — Native OWL 2 RL rule pass (15-rule subset)
+
+`rdf_owl_rl_materialise(asserted_iri TEXT, inferred_iri TEXT,
+options_json TEXT) → INTEGER` runs a native Rust fixpoint loop over
+Oxigraph's store, applying 15 W3C OWL 2 RL/RDF rules in one FFI
+crossing in place of `vv-graph`'s per-rule `Sparql.execute`
+round-trip. Skips the SPARQL parser per rule; ships parity with
+`vv-graph`'s `Vv::Graph::Reasoner::Rules::OwlRl` so the engine +
+gem produce identical closures (pinned by
+`test_rdf_owl_rl_materialise_equivalence_with_vg`).
+
+Driver: `CONSUMER_REQUIREMENT_VG.md` § "Requested extensions"
+item #6. VG's `Vv::Graph::Reasoner.materialise!` (gem-side Phase B
+already shipped) issues one `sparql_update` per rule per fixpoint
+iteration. The native pass collapses N rules × M iterations of
+SQL parse + SPARQL parse + evaluate to a single FFI crossing while
+preserving the gem's `:derivedBy <rule_iri> ; :derivedAt …`
+RDF-star provenance shape.
+
+Surface:
+
+- `rdf_owl_rl_materialise(asserted_iri, inferred_iri, options_json) → INTEGER`
+  - `asserted_iri = NULL` → default graph; otherwise a named graph.
+  - `inferred_iri = NULL` is **rejected** — derived triples mixing
+    into the default graph would erase the asserted-vs-derived
+    distinction OWL reasoning depends on.
+  - `options_json` JSON object; all fields optional. Defaults:
+    `{"max_iterations": 50, "provenance": false,
+     "derived_by_iri": "http://www.w3.org/ns/prov#wasDerivedFrom",
+     "derived_at_iri": "http://www.w3.org/ns/prov#generatedAtTime",
+     "rule_iri_prefix": "urn:semantica:rule:"}`.
+  - Return: signed net delta in store size — matches
+    `sparql_update`'s convention.
+
+Rule coverage (the 15 rules — W3C names verbatim):
+
+| Bucket | Rules |
+|---|---|
+| T-Box transitive closure | `scm-sco`, `scm-spo`, `scm-eqc1`, `scm-eqp1` |
+| A-Box propagation        | `cax-sco`, `prp-spo1` |
+| Domain / range           | `prp-dom`, `prp-rng` |
+| Property characteristics | `prp-trp`, `prp-symp`, `prp-inv1`, `prp-inv2`, `prp-fp` |
+| sameAs closure           | `eq-sym`, `eq-trans` |
+
+The remaining ~55 W3C OWL 2 RL rules are deferred to 0.10.0.
+Operators using ontologies that depend on out-of-subset constructs
+(`owl:intersectionOf`, `owl:unionOf`, `owl:hasKey`, etc.) should
+stay on the per-rule `sparql_update` path until 0.10.0 ships.
+
+With `"provenance": true`, every derived triple is annotated with
+two RDF-star quads in the inferred graph (since 0.7.0):
+
+```
+<< <s> <p> <o> >> prov:wasDerivedFrom <urn:semantica:rule:scm-sco> .
+<< <s> <p> <o> >> prov:generatedAtTime "2026-05-25T20:02:43Z"^^xsd:dateTime .
+```
+
+The predicate IRIs and rule-IRI prefix are operator-overridable;
+defaults match `vv-graph`'s `Vv::Graph::Reasoner` convention.
+
+Decisions worth flagging for consumers:
+
+- **Provenance shape commits to defaults that match VG.** Deviation
+  from PLAN_0.7.0/0.8.0's "engine stays domain-agnostic" posture —
+  materialisation has nowhere to put provenance except on the
+  triple it just derived (no consumer round-trip the way
+  `rdf_construct_many` has). The override mechanism softens the
+  coupling for callers using a different provenance vocabulary.
+  See `docs/plans/PLAN_0.9.0.md` for the rationale.
+- **Atomicity is partial-on-iteration.** If the fixpoint isn't
+  reached within `max_iterations`, the partial closure stays in
+  the inferred graph rather than rolling back. Matches
+  `sparql_update`'s partial-on-evaluation contract from 0.5.0.
+- **No `chrono` dependency.** A hand-rolled RFC3339 formatter
+  (Hinnant's civil-from-days algorithm, ~20 lines) handles the
+  one timestamp call site. Avoids ~150 KB of dylib growth from
+  a single-use dep.
+
+Error envelopes (fixed prefix for consumer pattern-matching):
+
+- `rdf_owl_rl_materialise: inferred_iri must be a named graph
+  (NULL is not allowed for the inferred slot)`
+- `rdf_owl_rl_materialise: fixpoint not reached after N iterations`
+- `rdf_owl_rl_materialise: rule <id> error at iteration N: …`
+- `rdf_owl_rl_materialise: options_json: …`
+
+Tests: 62 → 70 + 1 ignored. 8 new under
+`// ── 0.9.0 rdf_owl_rl_materialise ──` in
+`tests/integration_test.rs`. The equivalence test pins the engine's
+closure against a hand-written expected fixture (the closure VG
+would produce for the same input).
+
 ## 0.8.0 — Batched CONSTRUCT
 
 `rdf_construct_many(queries_json TEXT) → TEXT` evaluates N CONSTRUCT

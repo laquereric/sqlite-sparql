@@ -207,6 +207,53 @@ blob lands. Pre-flight: any parse error aborts the whole batch
 with the prefix `SPARQL parse error (query index N):` before any
 query evaluates.
 
+### OWL 2 RL native reasoning (since 0.9.0)
+
+For fixpoint reasoning workloads (OWL 2 RL closures), `rdf_owl_rl_materialise`
+runs a native Rust fixpoint loop in one FFI crossing in place of the
+gem-side per-rule `sparql_update` round-trip:
+
+```sql
+SELECT rdf_owl_rl_materialise(
+  NULL,                       -- asserted graph (NULL = default)
+  'urn:g:catalogue:inferred', -- inferred graph (must be a named graph)
+  json('{"max_iterations": 50, "provenance": true}')
+);
+-- => INTEGER (signed net delta in store size)
+```
+
+0.9.0 ships parity with `vv-graph`'s `Vv::Graph::Reasoner::Rules::OwlRl`
+— 15 rules from the W3C OWL 2 RL/RDF rule table covering T-Box
+transitive closures (`scm-sco`, `scm-spo`, `scm-eqc1`, `scm-eqp1`),
+A-Box propagation (`cax-sco`, `prp-spo1`), domain/range
+(`prp-dom`, `prp-rng`), property characteristics (`prp-trp`,
+`prp-symp`, `prp-inv1`, `prp-inv2`, `prp-fp`), and sameAs closure
+(`eq-sym`, `eq-trans`). The remaining ~55 W3C OWL 2 RL rules
+land in 0.10.0.
+
+With `"provenance": true`, every derived triple is annotated with
+two RDF-star quads (since 0.7.0):
+
+```
+<< <s> <p> <o> >> <http://www.w3.org/ns/prov#wasDerivedFrom>
+    <urn:semantica:rule:scm-sco> .
+<< <s> <p> <o> >> <http://www.w3.org/ns/prov#generatedAtTime>
+    "2026-05-25T20:02:43Z"^^xsd:dateTime .
+```
+
+The predicate IRIs and rule-IRI prefix are operator-overridable via
+`options.derived_by_iri` / `derived_at_iri` / `rule_iri_prefix`.
+Defaults match the `vv-graph` `Vv::Graph::Reasoner` convention so
+the engine + gem produce identical closures.
+
+`inferred_iri = NULL` is rejected — derived triples mixing into the
+default graph would erase the asserted-vs-derived distinction OWL
+reasoning depends on. Pre-flight: if the fixpoint isn't reached
+within `max_iterations` (default 50), error with the prefix
+`rdf_owl_rl_materialise: fixpoint not reached after N iterations`
+and leave the partially-derived state in the inferred graph for
+inspection.
+
 ### Bulk Load (Turtle)
 
 ```sql
@@ -403,10 +450,16 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] Graph-scoped bulk loading (`rdf_load_*_to_graph`) — landed in 0.6.0
 - [x] RDF-star / SPARQL-star round-trip — landed in 0.7.0
 - [x] Batched CONSTRUCT (`rdf_construct_many`) — landed in 0.8.0
+- [x] Native OWL 2 RL fixpoint pass (15-rule subset) — landed in 0.9.0
+- [ ] Full OWL 2 RL coverage (remaining ~55 rules) — PLAN_0.10.0
+- [ ] Native SHACL Core validator pass — PLAN_0.11.0 (VG CR #7)
+- [ ] Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails
 - [ ] Persistent store via Oxigraph's RocksDB backend — *deferred,
       no consumer pressure; revive on first ask*
+- [ ] Differential dataflow at the store layer — *deferred (VG CR
+      #10 explicitly out-of-reach for incremental engine work)*
 
 ---
 
