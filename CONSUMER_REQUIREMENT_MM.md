@@ -214,6 +214,15 @@ required:
   skip the index write-through. vv-graph driver
   (`Vv::Graph::Reasoner.dred!` once that ships PLAN_0.11.0 Phase A);
   no MM call site today.
+- `rdf_owl_rl_consistent(asserted, inferred, options_json) →
+  TEXT` (from 0.13.0) — read-only pass over the 17 W3C OWL 2 RL
+  inconsistency rules (`prp-irp/asyp/pdw/adp/npa1/npa2`,
+  `cls-nothing2/com/maxc1/maxqc1/maxqc2`, `cax-dw/adc`,
+  `eq-diff1/2/3`, `dt-not-type`). Returns a JSON array of
+  `{rule, s, p, o}` records (or `"[]"` when consistent). Never
+  inserts into the store. vv-graph driver
+  (`Vv::Graph::Reasoner.consistent?` once that lands gem-side);
+  no MM call site today.
 
 ## Behaviours MM does NOT depend on
 

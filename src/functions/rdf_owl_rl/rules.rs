@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 
 // ── Constant IRIs (well-known, zero validation cost via `_unchecked`) ────────
 
-const RDF_TYPE: NamedNodeRef<'_> =
+pub(crate) const RDF_TYPE: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
 const RDFS_SUB_CLASS_OF: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2000/01/rdf-schema#subClassOf");
@@ -55,7 +55,7 @@ const OWL_EQUIVALENT_PROPERTY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#equivalentProperty");
 const OWL_INVERSE_OF: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#inverseOf");
-const OWL_SAME_AS: NamedNodeRef<'_> =
+pub(crate) const OWL_SAME_AS: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#sameAs");
 const OWL_TRANSITIVE_PROPERTY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#TransitiveProperty");
@@ -69,13 +69,13 @@ const OWL_OBJECT_PROPERTY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#ObjectProperty");
 const OWL_DATATYPE_PROPERTY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#DatatypeProperty");
-const OWL_THING: NamedNodeRef<'_> =
+pub(crate) const OWL_THING: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#Thing");
-const OWL_NOTHING: NamedNodeRef<'_> =
+pub(crate) const OWL_NOTHING: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#Nothing");
 const OWL_HAS_VALUE: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#hasValue");
-const OWL_ON_PROPERTY: NamedNodeRef<'_> =
+pub(crate) const OWL_ON_PROPERTY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#onProperty");
 const OWL_SOME_VALUES_FROM: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#someValuesFrom");
@@ -87,11 +87,11 @@ const OWL_UNION_OF: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#unionOf");
 const OWL_ONE_OF: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#oneOf");
-const OWL_MAX_CARDINALITY: NamedNodeRef<'_> =
+pub(crate) const OWL_MAX_CARDINALITY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#maxCardinality");
-const OWL_MAX_QUALIFIED_CARDINALITY: NamedNodeRef<'_> =
+pub(crate) const OWL_MAX_QUALIFIED_CARDINALITY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#maxQualifiedCardinality");
-const OWL_ON_CLASS: NamedNodeRef<'_> =
+pub(crate) const OWL_ON_CLASS: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#onClass");
 const OWL_INVERSE_FUNCTIONAL_PROPERTY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#InverseFunctionalProperty");
@@ -247,7 +247,7 @@ pub(crate) const EQ_REF_RULE_IRI: &str = "eq-ref";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn graph_to_ref(g: &GraphName) -> GraphNameRef<'_> {
+pub(crate) fn graph_to_ref(g: &GraphName) -> GraphNameRef<'_> {
     match g {
         GraphName::DefaultGraph => GraphNameRef::DefaultGraph,
         GraphName::NamedNode(n) => GraphNameRef::NamedNode(n.as_ref()),
@@ -258,7 +258,7 @@ fn graph_to_ref(g: &GraphName) -> GraphNameRef<'_> {
 /// Iterate the asserted graph then the inferred graph. If they're the
 /// same graph (operator-supplied edge case from PLAN_0.9.0 Phase D),
 /// iterate it once.
-fn graphs_to_query<'a>(a: &'a GraphName, i: &'a GraphName) -> Vec<&'a GraphName> {
+pub(crate) fn graphs_to_query<'a>(a: &'a GraphName, i: &'a GraphName) -> Vec<&'a GraphName> {
     if a == i {
         vec![a]
     } else {
@@ -268,7 +268,7 @@ fn graphs_to_query<'a>(a: &'a GraphName, i: &'a GraphName) -> Vec<&'a GraphName>
 
 /// Collect every `(subject, object)` for the given predicate from the
 /// premise graphs. Deduplicates across asserted + inferred.
-fn pairs_for_predicate(
+pub(crate) fn pairs_for_predicate(
     store: &Store,
     predicate: NamedNodeRef<'_>,
     asserted: &GraphName,
@@ -286,7 +286,7 @@ fn pairs_for_predicate(
 }
 
 /// Collect every subject `?s` whose `(?s rdf:type <target_class>)` holds.
-fn instances_of(
+pub(crate) fn instances_of(
     store: &Store,
     target_class: NamedNodeRef<'_>,
     asserted: &GraphName,
@@ -306,7 +306,7 @@ fn instances_of(
 
 /// Collect every quad in the asserted+inferred union. Used by rules whose
 /// premise pattern is `?s ?p ?o` (e.g. `prp-spo1`, `prp-dom`, `prp-rng`).
-fn all_quads(
+pub(crate) fn all_quads(
     store: &Store,
     asserted: &GraphName,
     inferred: &GraphName,
@@ -323,7 +323,7 @@ fn all_quads(
 }
 
 /// Subject → Term coercion for use as a join key. Always succeeds.
-fn subj_to_term(s: &Subject) -> Term {
+pub(crate) fn subj_to_term(s: &Subject) -> Term {
     match s {
         Subject::NamedNode(n) => Term::NamedNode(n.clone()),
         Subject::BlankNode(b) => Term::BlankNode(b.clone()),
@@ -333,7 +333,7 @@ fn subj_to_term(s: &Subject) -> Term {
 
 /// Term → Subject coercion; returns None when the term is a Literal
 /// (literals are not allowed in subject position in RDF).
-fn term_to_subj(t: &Term) -> Option<Subject> {
+pub(crate) fn term_to_subj(t: &Term) -> Option<Subject> {
     match t {
         Term::NamedNode(n) => Some(Subject::NamedNode(n.clone())),
         Term::BlankNode(b) => Some(Subject::BlankNode(b.clone())),
@@ -344,7 +344,7 @@ fn term_to_subj(t: &Term) -> Option<Subject> {
 
 /// Term → NamedNode coercion; returns None for any other term type. Used
 /// when a rule needs to bind a predicate variable (predicates must be IRIs).
-fn term_to_named(t: &Term) -> Option<NamedNode> {
+pub(crate) fn term_to_named(t: &Term) -> Option<NamedNode> {
     match t {
         Term::NamedNode(n) => Some(n.clone()),
         _ => None,
@@ -1490,7 +1490,7 @@ fn collect_class_lists(
 }
 
 /// Index `(?s rdf:type ?c)` triples by the class term `?c`.
-fn type_pairs_index_by_class(
+pub(crate) fn type_pairs_index_by_class(
     store: &Store,
     a: &GraphName,
     i: &GraphName,
@@ -1504,7 +1504,7 @@ fn type_pairs_index_by_class(
 }
 
 /// Index `(?s rdf:type ?c)` triples by the subject `?s`.
-fn type_pairs_index_by_subject(
+pub(crate) fn type_pairs_index_by_subject(
     store: &Store,
     a: &GraphName,
     i: &GraphName,
@@ -1521,7 +1521,7 @@ fn type_pairs_index_by_subject(
 /// whose value equals `target_value` (e.g. `owl:maxCardinality 1`). The
 /// value comparison parses the literal's lexical form as a `u32`, matching
 /// any XSD integer-shaped datatype with the right numeric value.
-fn collect_cardinality_restrictions(
+pub(crate) fn collect_cardinality_restrictions(
     store: &Store,
     cardinality_predicate: NamedNodeRef<'_>,
     target_value: u32,
@@ -1552,7 +1552,7 @@ fn collect_cardinality_restrictions(
 /// unsigned integer. Covers `"0"^^xsd:integer`, `"0"^^xsd:nonNegativeInteger`,
 /// `"0"^^xsd:int`, plain `"0"`, etc. — the comparison is on the abstract
 /// numeric value, not the datatype IRI.
-fn literal_int_value_eq(t: &Term, target: u32) -> bool {
+pub(crate) fn literal_int_value_eq(t: &Term, target: u32) -> bool {
     let Term::Literal(lit) = t else {
         return false;
     };

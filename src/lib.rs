@@ -82,6 +82,9 @@ pub fn sqlite3_sqlitesparql_init(db: *mut sqlite3) -> sqlite_loadable::Result<()
     // Register native OWL 2 RL reasoning (rdf_owl_rl_materialise)
     functions::rdf_owl_rl::register(db)?;
 
+    // Register native OWL 2 RL inconsistency detection (rdf_owl_rl_consistent)
+    functions::rdf_owl_rl_consistent::register(db)?;
+
     // Register native SHACL Core validator (rdf_shacl_core_validate)
     functions::rdf_shacl_core::register(db)?;
 

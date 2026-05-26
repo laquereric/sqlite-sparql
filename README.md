@@ -320,6 +320,74 @@ fixed-prefix errors so consumers can pattern-match. `data_iri =
 NULL` means the default graph (same convention as
 `rdf_owl_rl_materialise`).
 
+### OWL 2 RL inconsistency detection (since 0.13.0)
+
+For consistency-checking workloads, `rdf_owl_rl_consistent` runs a
+read-only pass over the 17 W3C OWL 2 RL/RDF *inconsistency* rules —
+the "false"-deriving siblings of the 60 derivation rules in
+`rdf_owl_rl_materialise`. Returns a JSON array of `{rule, s, p, o}`
+witness records, or `"[]"` when the graphs are consistent:
+
+```sql
+-- Optional: materialise first so the inconsistency rules can find
+-- indirect contradictions through the inferred closure.
+SELECT rdf_owl_rl_materialise(NULL, 'urn:g:inferred', '{}');
+
+-- Then check for inconsistency.
+SELECT rdf_owl_rl_consistent(
+  NULL,               -- asserted graph (NULL = default graph)
+  'urn:g:inferred',   -- inferred graph (required)
+  '{}'
+);
+-- => "[]"   when consistent
+-- => '[{"rule":"cax-dw","s":"<urn:alice>","p":"<…#type>","o":"<urn:Animal>"}, …]'
+
+-- Drive directly from SQL via json_each:
+SELECT json_extract(value, '$.rule') AS rule,
+       json_extract(value, '$.s')    AS s,
+       json_extract(value, '$.p')    AS p,
+       json_extract(value, '$.o')    AS o
+FROM   json_each(rdf_owl_rl_consistent(NULL, 'urn:g:inferred', '{}'));
+```
+
+Rule coverage (all 17 W3C inconsistency rules):
+
+| Group | Rules |
+|---|---|
+| **Prp** (6) | `prp-irp`, `prp-asyp`, `prp-pdw`, `prp-adp`, `prp-npa1`, `prp-npa2` |
+| **Cls** (5) | `cls-nothing2`, `cls-com`, `cls-maxc1`, `cls-maxqc1`, `cls-maxqc2` |
+| **Cax** (2) | `cax-dw`, `cax-adc` |
+| **Eq** (3) | `eq-diff1`, `eq-diff2`, `eq-diff3` |
+| **Dt** (1) | `dt-not-type` (XSD integer family + booleans) |
+
+Symmetric rules (`cax-dw`, `prp-asyp`, `cls-com`, `eq-diff*`,
+`prp-pdw`, `prp-adp`, `cax-adc`) emit one record per semantic
+violation — the witness commits to the lex-smaller participant
+by N-Triples form. Output is globally sorted by `(rule, s, p,
+o)` so two back-to-back calls on the same store produce
+byte-identical JSON.
+
+The function is read-only: never inserts into the store, never
+touches the dependency index. Composing with materialise +
+DRed is a natural pattern — materialise to saturate, check
+consistency, and if violations appear, retract premises and
+re-DRed.
+
+Options (all optional):
+
+| Option | Default | Purpose |
+|---|---|---|
+| `max_violations` | `10_000` | Safety cap; exceeding aborts with a fixed-prefix error (no silent truncate — matches `rdf_shacl_core_validate`) |
+
+`inferred_iri = NULL` is rejected with a fixed-prefix error so
+consumers can pattern-match. `asserted_iri = NULL` means the
+default graph.
+
+`dt-not-type` validates the XSD integer family and booleans in
+0.13.0. Decimal, double, dateTime, anyURI, and the string
+family skip validation — no false positives. Custom datatype
+IRIs are opaque to OWL 2 RL and skip too.
+
 ### Incremental reasoning with DRed (since 0.12.0)
 
 For incremental reasoning workloads, `rdf_dred_overdelete` is the
@@ -574,7 +642,8 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] Native dependency index for DRed (5 core derivation rules,
       `rdf_dred_overdelete` + `track_dependencies` materialise option)
       — landed in 0.12.0
-- [ ] OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) — future
+- [x] OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`,
+      all 17 W3C inconsistency rules) — landed in 0.13.0
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails
 - [ ] Persistent store via Oxigraph's RocksDB backend — *deferred,

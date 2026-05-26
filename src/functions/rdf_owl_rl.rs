@@ -27,6 +27,7 @@ use sqlite_loadable::{api, define_scalar_function, prelude::*, Error, FunctionFl
 use crate::error::SparqlError;
 use crate::store::{parse_graph_name, with_store};
 
+pub(crate) mod inconsistency;
 pub(crate) mod rdf_lists;
 pub(crate) mod rules;
 

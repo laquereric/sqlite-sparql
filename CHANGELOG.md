@@ -1,5 +1,127 @@
 # Changelog
 
+## 0.13.0 — Native OWL 2 RL inconsistency detection
+
+`rdf_owl_rl_consistent(asserted_iri, inferred_iri, options_json) →
+TEXT` lands as a new top-level scalar returning a JSON array of
+`{rule, s, p, o}` violation records (or `"[]"` for consistent).
+Ships the 17 W3C OWL 2 RL/RDF *inconsistency* rules that
+PLAN_0.10.0 deliberately deferred — the "false"-deriving rules
+that sit outside `rdf_owl_rl_materialise`'s monotonic-fixpoint
+contract.
+
+Driver: PLAN_0.10.0 §"Inconsistency rules — deferred to a separate
+surface" explicitly nominated this slot. No `Vv::Graph::Reasoner.
+consistent?` caller yet; the engine ships the surface so the gem
+can flip on whenever it grows the check. Forward-leaning ship per
+the same posture as 0.9.0 / 0.10.0 / 0.11.0 / 0.12.0.
+
+### Rule coverage (all 17 rules ship)
+
+| Group | Rules | Witness shape |
+|---|---|---|
+| **Prp** (6) | `prp-irp`, `prp-asyp`, `prp-pdw`, `prp-adp`, `prp-npa1`, `prp-npa2` | `(x, p, y)` triple that violates the property axiom |
+| **Cls** (5) | `cls-nothing2`, `cls-com`, `cls-maxc1`, `cls-maxqc1`, `cls-maxqc2` | `(x, rdf:type, c)` or `(x, p, y)` |
+| **Cax** (2) | `cax-dw`, `cax-adc` | `(x, rdf:type, c)` — the smaller-IRI side of the disjoint pair |
+| **Eq** (3) | `eq-diff1`, `eq-diff2`, `eq-diff3` | `(x, owl:sameAs, y)` — the contradicted equality |
+| **Dt** (1) | `dt-not-type` | `(s, p, "lex"^^<dt>)` — the malformed literal triple |
+
+### Surface
+
+```sql
+SELECT rdf_owl_rl_consistent(
+  NULL,                         -- asserted graph (NULL = default graph)
+  'urn:g:catalogue:inferred',   -- inferred graph (required)
+  json('{"max_violations": 10000}')
+);
+-- => TEXT (JSON array)
+--
+-- [] when consistent; otherwise:
+-- [
+--   {"rule":"cax-dw",  "s":"<urn:alice>", "p":"<…#type>", "o":"<urn:Animal>"},
+--   {"rule":"prp-irp", "s":"<urn:bob>",   "p":"<urn:parentOf>", "o":"<urn:bob>"}
+-- ]
+```
+
+### Per-derivation determinism
+
+Symmetric rules (`cax-dw`, `prp-asyp`, `cls-com`, `eq-diff1`,
+`prp-pdw`, `prp-adp`, `cax-adc`, `eq-diff2`, `eq-diff3`) emit
+**one** record per semantic violation — the witness commits to
+the lex-smaller participant by N-Triples form. Output is
+globally sorted by `(rule, s, p, o)` so two back-to-back calls
+on the same store produce byte-identical JSON.
+
+### Witness format
+
+`s` / `p` / `o` use N-Triples-style serialisation:
+- IRI: `<http://example.org/alice>`
+- Blank node: `_:b0`
+- Literal: `"thirty"^^<http://www.w3.org/2001/XMLSchema#integer>`
+- Quoted triple (RDF-star, since 0.7.0): `<< <s> <p> <o> >>`
+
+This is the same format `rdf_term_value` / `rdf_triple_subject`
+consume — round-trippable without an extra parse pass.
+
+### Options (all optional)
+
+| Option | Default | Purpose |
+|---|---|---|
+| `max_violations` | `10000` | Safety cap; exceeding aborts with a fixed-prefix error (no silent truncate — matches `rdf_shacl_core_validate`'s posture) |
+
+### Error envelopes (fixed-prefix for consumer pattern-matching)
+
+- `rdf_owl_rl_consistent: inferred_iri must be a named graph …`
+- `rdf_owl_rl_consistent: options_json: <serde error>`
+- `rdf_owl_rl_consistent: violation count exceeded max_violations (N)`
+- `rdf_owl_rl_consistent: rule <id> error: <message>`
+
+### Read-only
+
+Inconsistency detection never inserts into the store and never
+touches the dependency index (0.12.0). Pin: a dedicated
+`test_rdf_owl_rl_consistent_read_only` integration test
+asserts `rdf_count_all()` before == after.
+
+### `dt-not-type` validation scope
+
+0.13.0 validates the XSD **integer family** (`integer`, `int`,
+`long`, `short`, `byte`, `nonNegativeInteger`,
+`positiveInteger`, `nonPositiveInteger`, `negativeInteger`,
+`unsigned{Long,Int,Short,Byte}`) and **booleans**. Decimal,
+double / float, dateTime, anyURI, and the string family skip
+validation — no false positives. Custom datatype IRIs are
+opaque to OWL 2 RL and skip too. Documented for future
+expansion.
+
+### Implementation
+
+- `src/functions/rdf_owl_rl/inconsistency.rs` — 17 `detect_*`
+  functions + `INCONSISTENCY_RULES` dispatch table + 5 in-module
+  smoke tests.
+- `src/functions/rdf_owl_rl_consistent.rs` — the SQL scalar
+  shell, options struct, max-violations guard.
+- Helper visibility in `rules.rs` bumped to `pub(crate)` for
+  reuse (`pairs_for_predicate`, `instances_of`, `all_quads`,
+  `term_to_subj` / `term_to_named` / `subj_to_term`,
+  `graphs_to_query`, `graph_to_ref`, `literal_int_value_eq`,
+  `collect_cardinality_restrictions`,
+  `type_pairs_index_by_{class,subject}` plus the
+  well-known IRI constants).
+- 21 new integration tests under `// ── 0.13.0 rdf_owl_rl_consistent ──`.
+
+### Out of scope (revisit on consumer signal)
+
+- `report_iri` option that writes violations into a graph
+  instead of returning JSON. Would parallel
+  `rdf_shacl_core_validate`'s report-graph mode.
+- Cross-rule deduplication. Two rules can witness the same
+  underlying contradiction (`cls-com` + `cax-dw` when complement
+  is also disjoint). Each emits independently; consumers dedupe
+  if they care.
+- Repair suggestions (`sh:resultMessage` analogue).
+- Extended datatype validation (decimal, float, dateTime, etc.).
+
 ## 0.12.0 — Native dependency index for DRed
 
 `rdf_dred_overdelete(inferred_iri, retracted_premises_json) →

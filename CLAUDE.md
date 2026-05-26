@@ -158,13 +158,22 @@ no-ops in Oxigraph 0.4 (literal subjects not representable).
 Driver: VG CR #6. See `docs/plans/PLAN_0.9.0.md`,
 `docs/plans/PLAN_0.10.0.md`, and `src/functions/rdf_owl_rl/`.
 
-### 7. OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) — DEFERRED
-The ~15 W3C "false"-deriving rules (`prp-irp`, `cax-dw`, `cls-com`,
-`eq-diff*`, `dt-not-type`, etc.) sit outside
-`rdf_owl_rl_materialise`'s monotonic fixpoint contract. Future
-release will ship a separate scalar returning a JSON array of
-violation records, paralleling SHACL's `sh:ValidationReport`
-shape. No consumer signal yet.
+### 7. OWL 2 RL inconsistency detection — DONE in 0.13.0
+`rdf_owl_rl_consistent(asserted_iri, inferred_iri, options_json) → TEXT`
+returns a JSON array of `{rule, s, p, o}` violation records (or `"[]"`
+for consistent). Ships all 17 W3C OWL 2 RL/RDF inconsistency rules
+(Prp×6, Cls×5, Cax×2, Eq×3, Dt×1) outside the monotonic-fixpoint
+contract of `rdf_owl_rl_materialise`. Read-only — never inserts into
+the store, never touches the dependency index. Symmetric rules emit
+one record per semantic violation with deterministic lex-smaller
+witness; output is globally sorted by `(rule, s, p, o)`. `dt-not-type`
+validates the XSD integer family + booleans (other datatypes skip;
+no false positives). No consumer signal from Vv::Graph today
+(`Reasoner.consistent?` not implemented), but the engine ships the
+surface so the gem can flip on whenever it grows the check. Driver:
+PLAN_0.10.0 §"Inconsistency rules — deferred to a separate surface."
+See `docs/plans/PLAN_0.13.0.md`, `src/functions/rdf_owl_rl/
+inconsistency.rs`, and `src/functions/rdf_owl_rl_consistent.rs`.
 
 ### 8. Native SHACL Core validator pass — DONE in 0.11.0
 `rdf_shacl_core_validate(data_iri, shapes_iri, report_iri,
@@ -371,6 +380,60 @@ SELECT rdf_shacl_core_validate(
 --   - The remaining ~18 SHACL Core constraints in VG's PHASE_B_PENDING.
 --   - SHACL Advanced (sh:function, sh:expression).
 ```
+
+### OWL 2 RL inconsistency detection (since 0.13.0)
+
+```sql
+-- Read-only pass over the 17 W3C OWL 2 RL/RDF inconsistency rules.
+-- Returns a JSON array of {rule, s, p, o} witness records, or "[]"
+-- when the graphs are consistent.
+SELECT rdf_owl_rl_consistent(
+  NULL,                         -- asserted graph (NULL = default graph)
+  'urn:g:catalogue:inferred',   -- inferred graph (required)
+  json('{"max_violations": 10000}')
+);
+-- => "[]"  when consistent, else e.g.:
+-- '[{"rule":"cax-dw","s":"<urn:alice>","p":"<…#type>","o":"<urn:Animal>"},
+--   {"rule":"prp-irp","s":"<urn:bob>","p":"<urn:parentOf>","o":"<urn:bob>"}]'
+
+-- Consume from SQL via json_each:
+SELECT json_extract(value, '$.rule') AS rule,
+       json_extract(value, '$.s')    AS s,
+       json_extract(value, '$.p')    AS p,
+       json_extract(value, '$.o')    AS o
+FROM   json_each(rdf_owl_rl_consistent(NULL, 'urn:g:inferred', '{}'));
+```
+
+Rule coverage (all 17 W3C OWL 2 RL inconsistency rules):
+
+- **Prp** (6): `prp-irp`, `prp-asyp`, `prp-pdw`, `prp-adp`,
+  `prp-npa1`, `prp-npa2`.
+- **Cls** (5): `cls-nothing2`, `cls-com`, `cls-maxc1`,
+  `cls-maxqc1`, `cls-maxqc2`.
+- **Cax** (2): `cax-dw`, `cax-adc`.
+- **Eq** (3): `eq-diff1`, `eq-diff2`, `eq-diff3`.
+- **Dt** (1): `dt-not-type` (XSD integer family + booleans;
+  other datatypes skip).
+
+Symmetric rules (`cax-dw`, `prp-asyp`, `cls-com`, `eq-diff1`,
+`prp-pdw`, `prp-adp`, `cax-adc`, `eq-diff2`, `eq-diff3`) emit
+one record per semantic violation with lex-smaller witness.
+Output is globally sorted — byte-identical across runs.
+
+Options (all optional):
+- `max_violations: usize` (default `10_000`) — exceeding aborts
+  with a fixed-prefix error (no silent truncate, matches SHACL).
+
+Error envelopes (fixed-prefix for consumer pattern-matching):
+- `rdf_owl_rl_consistent: inferred_iri must be a named graph …`
+- `rdf_owl_rl_consistent: options_json: <serde error>`
+- `rdf_owl_rl_consistent: violation count exceeded max_violations (N)`
+- `rdf_owl_rl_consistent: rule <id> error: <message>`
+
+Read-only: never inserts into the store, never touches the
+dependency index. Compose with `rdf_owl_rl_materialise` by
+calling materialise first then consistent — saturated inferences
+help the inconsistency rules find indirect contradictions.
 
 ### Incremental reasoning with DRed (since 0.12.0)
 

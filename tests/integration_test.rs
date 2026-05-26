@@ -3219,4 +3219,438 @@ mod tests {
     fn _keep_count_in_graph(conn: &Connection, g: &str) -> Result<i64> {
         count_in_graph(conn, g)
     }
+
+    // ── 0.13.0 rdf_owl_rl_consistent ──────────────────────────────────────────
+
+    /// Ergonomic: call the consistent function and parse the JSON return.
+    fn consistent_violations(conn: &Connection, opts: &str) -> Result<serde_json::Value> {
+        let json: String = conn.query_row(
+            "SELECT rdf_owl_rl_consistent(NULL, 'urn:g:inferred', ?)",
+            [opts],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(&json).expect("violations JSON parse"))
+    }
+
+    fn first_rule(v: &serde_json::Value) -> String {
+        v[0]["rule"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_empty_store_returns_array() -> Result<()> {
+        let conn = open_with_extension()?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert!(v.as_array().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_no_violations() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+               'http://e/Person');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert!(v.as_array().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_cax_dw_single_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/Animal',
+               'http://www.w3.org/2002/07/owl#disjointWith', 'http://e/Plant');
+             SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Animal');
+             SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Plant');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "expected one cax-dw record, got {arr:?}");
+        assert_eq!(first_rule(&v), "cax-dw");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_eq_diff1_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/x',
+               'http://www.w3.org/2002/07/owl#differentFrom', 'http://e/y');
+             SELECT rdf_insert('http://e/x',
+               'http://www.w3.org/2002/07/owl#sameAs', 'http://e/y');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(first_rule(&v), "eq-diff1");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_prp_npa1_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        // NPA in blank-node form: _:n sourceIndividual :alice ;
+        //                              assertionProperty :married ;
+        //                              targetIndividual :bob .
+        conn.execute_batch(
+            "SELECT rdf_load_turtle('
+              @prefix owl: <http://www.w3.org/2002/07/owl#> .
+              @prefix ex:  <http://example.org/> .
+
+              [] a owl:NegativePropertyAssertion ;
+                 owl:sourceIndividual ex:alice ;
+                 owl:assertionProperty ex:married ;
+                 owl:targetIndividual ex:bob .
+
+              ex:alice ex:married ex:bob .
+            ');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "expected one prp-npa1 record, got {arr:?}");
+        assert_eq!(first_rule(&v), "prp-npa1");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_prp_npa2_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_load_turtle('
+              @prefix owl: <http://www.w3.org/2002/07/owl#> .
+              @prefix ex:  <http://example.org/> .
+
+              [] a owl:NegativePropertyAssertion ;
+                 owl:sourceIndividual ex:alice ;
+                 owl:assertionProperty ex:age ;
+                 owl:targetValue 42 .
+
+              ex:alice ex:age 42 .
+            ');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "prp-npa2");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_prp_irp_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/parentOf',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+               'http://www.w3.org/2002/07/owl#IrreflexiveProperty');
+             SELECT rdf_insert('http://e/alice', 'http://e/parentOf', 'http://e/alice');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "prp-irp");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_prp_asyp_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/parentOf',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+               'http://www.w3.org/2002/07/owl#AsymmetricProperty');
+             SELECT rdf_insert('http://e/alice', 'http://e/parentOf', 'http://e/bob');
+             SELECT rdf_insert('http://e/bob',   'http://e/parentOf', 'http://e/alice');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "prp-asyp");
+        // Symmetric pair → exactly ONE record (lex-smaller witness).
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_prp_pdw_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/parentOf',
+               'http://www.w3.org/2002/07/owl#propertyDisjointWith',
+               'http://e/enemyOf');
+             SELECT rdf_insert('http://e/alice', 'http://e/parentOf', 'http://e/bob');
+             SELECT rdf_insert('http://e/alice', 'http://e/enemyOf', 'http://e/bob');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "prp-pdw");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_cls_nothing2_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/x',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+               'http://www.w3.org/2002/07/owl#Nothing');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "cls-nothing2");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_cls_com_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/Living',
+               'http://www.w3.org/2002/07/owl#complementOf', 'http://e/Dead');
+             SELECT rdf_insert('http://e/zombie',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Living');
+             SELECT rdf_insert('http://e/zombie',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Dead');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "cls-com");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_cls_maxc1_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Restriction class with owl:maxCardinality 0 onProperty :hasChild;
+        // :alice rdf:type :Childless . :alice :hasChild :ben .
+        conn.execute_batch(
+            "SELECT rdf_load_turtle('
+              @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+              @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+              @prefix ex:   <http://example.org/> .
+
+              ex:Childless owl:maxCardinality 0 ;
+                           owl:onProperty ex:hasChild .
+
+              ex:alice a ex:Childless ;
+                       ex:hasChild ex:ben .
+            ');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "cls-maxc1");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_dt_not_type_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            r#"SELECT rdf_insert(
+                 'http://e/alice', 'http://e/age',
+                 '"thirty"^^<http://www.w3.org/2001/XMLSchema#integer>'
+               );"#,
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert_eq!(first_rule(&v), "dt-not-type");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_multiple_violations_distinct_rules() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/Animal',
+               'http://www.w3.org/2002/07/owl#disjointWith', 'http://e/Plant');
+             SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Animal');
+             SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Plant');
+             SELECT rdf_insert('http://e/parentOf',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+               'http://www.w3.org/2002/07/owl#IrreflexiveProperty');
+             SELECT rdf_insert('http://e/bob', 'http://e/parentOf', 'http://e/bob');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "expected 2 violations, got {arr:?}");
+        let rules: std::collections::HashSet<String> = arr
+            .iter()
+            .map(|r| r["rule"].as_str().unwrap().to_string())
+            .collect();
+        assert!(rules.contains("cax-dw"));
+        assert!(rules.contains("prp-irp"));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_max_violations_guard() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Five separate cax-dw violations.
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/A',
+               'http://www.w3.org/2002/07/owl#disjointWith', 'http://e/B');",
+        )?;
+        for i in 1..=5 {
+            let s = format!(
+                "SELECT rdf_insert('http://e/x{i}',
+                  'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/A');
+                 SELECT rdf_insert('http://e/x{i}',
+                  'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/B');"
+            );
+            conn.execute_batch(&s)?;
+        }
+        let err = conn
+            .query_row(
+                "SELECT rdf_owl_rl_consistent(NULL, 'urn:g:inferred',
+                   json('{\"max_violations\": 2}'))",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rdf_owl_rl_consistent: violation count exceeded max_violations"),
+            "expected fixed-prefix guard error, got: {msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_read_only() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/Animal',
+               'http://www.w3.org/2002/07/owl#disjointWith', 'http://e/Plant');
+             SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Animal');
+             SELECT rdf_insert('http://e/alice',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/Plant');",
+        )?;
+        let before: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        let _ = consistent_violations(&conn, "{}")?;
+        let after: i64 = conn.query_row("SELECT rdf_count()", [], |r| r.get(0))?;
+        assert_eq!(before, after, "consistent must not write to the store");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_inferred_iri_required() -> Result<()> {
+        let conn = open_with_extension()?;
+        let err = conn
+            .query_row(
+                "SELECT rdf_owl_rl_consistent(NULL, NULL, '{}')",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rdf_owl_rl_consistent: inferred_iri must be a named graph"),
+            "expected named-graph error, got: {msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_cax_adc_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_load_turtle('
+              @prefix owl: <http://www.w3.org/2002/07/owl#> .
+              @prefix ex:  <http://example.org/> .
+
+              [] a owl:AllDisjointClasses ;
+                 owl:members ( ex:A ex:B ex:C ) .
+
+              ex:alice a ex:A , ex:B .
+            ');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        let arr = v.as_array().unwrap();
+        assert!(!arr.is_empty(), "expected cax-adc violation, got {arr:?}");
+        assert_eq!(first_rule(&v), "cax-adc");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_eq_diff2_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_load_turtle('
+              @prefix owl: <http://www.w3.org/2002/07/owl#> .
+              @prefix ex:  <http://example.org/> .
+
+              [] a owl:AllDifferent ;
+                 owl:members ( ex:a ex:b ex:c ) .
+
+              ex:a owl:sameAs ex:b .
+            ');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert!(!v.as_array().unwrap().is_empty());
+        assert_eq!(first_rule(&v), "eq-diff2");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_eq_diff3_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        conn.execute_batch(
+            "SELECT rdf_load_turtle('
+              @prefix owl: <http://www.w3.org/2002/07/owl#> .
+              @prefix ex:  <http://example.org/> .
+
+              [] a owl:AllDifferent ;
+                 owl:distinctMembers ( ex:a ex:b ex:c ) .
+
+              ex:a owl:sameAs ex:b .
+            ');",
+        )?;
+        let v = consistent_violations(&conn, "{}")?;
+        assert!(!v.as_array().unwrap().is_empty());
+        assert_eq!(first_rule(&v), "eq-diff3");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_owl_rl_consistent_ordering_stable() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Multiple cax-dw violations — output must be deterministically sorted.
+        conn.execute_batch(
+            "SELECT rdf_insert('http://e/A',
+               'http://www.w3.org/2002/07/owl#disjointWith', 'http://e/B');
+             SELECT rdf_insert('http://e/x1',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/A');
+             SELECT rdf_insert('http://e/x1',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/B');
+             SELECT rdf_insert('http://e/x2',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/A');
+             SELECT rdf_insert('http://e/x2',
+               'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://e/B');",
+        )?;
+        let v1 = consistent_violations(&conn, "{}")?;
+        let v2 = consistent_violations(&conn, "{}")?;
+        assert_eq!(v1, v2, "two back-to-back calls must produce identical JSON");
+        // The lex-smaller subject (x1) should come first.
+        let arr = v1.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr[0]["s"].as_str().unwrap().contains("x1"));
+        assert!(arr[1]["s"].as_str().unwrap().contains("x2"));
+        Ok(())
+    }
 }
