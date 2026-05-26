@@ -166,11 +166,18 @@ release will ship a separate scalar returning a JSON array of
 violation records, paralleling SHACL's `sh:ValidationReport`
 shape. No consumer signal yet.
 
-### 8. Native SHACL Core validator pass — PLAN_0.11.0 (VG CR #7)
-A native Rust pass that evaluates SHACL Core constraints against a
-data graph and emits a W3C-conformant `sh:ValidationReport` graph
-in one FFI crossing. Substantial — ~30 constraint components plus
-path-expression evaluation.
+### 8. Native SHACL Core validator pass — DONE in 0.11.0
+`rdf_shacl_core_validate(data_iri, shapes_iri, report_iri,
+options_json) → INTEGER` walks the data graph once per shape and
+emits a W3C-conformant `sh:ValidationReport` into the report graph
+in one FFI crossing. Ships the 12-constraint subset matching VG's
+`Vv::Graph::Shacl::ConstraintLibrary` (sh:minCount/maxCount/
+datatype/nodeKind/class/pattern/minLength/maxLength/in/hasValue/
+minInclusive/maxInclusive), plus a path evaluator covering
+predicate / inverse / sequence / alternative / zero-or-more /
+one-or-more / zero-or-one. Report graph is cleared before each
+call. Driver: VG CR #7. See `docs/plans/PLAN_0.11.0.md` and
+`src/functions/rdf_shacl_core/`.
 
 ### 9. Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
 A side-table mapping inferred-triple IDs to their premise triple IDs,
@@ -306,6 +313,55 @@ SELECT rdf_owl_rl_materialise(
 --   dt-eq / dt-diff currently emit nothing (Oxigraph 0.4's Subject
 --     enum has no Literal variant; the W3C rule emits literal-subject
 --     sameAs / differentFrom triples which can't be constructed).
+```
+
+### Validation (since 0.11.0)
+
+```sql
+-- Native SHACL Core validator pass. 0.11.0 ships the 12-constraint
+-- subset matching vv-graph's Vv::Graph::Shacl::ConstraintLibrary, plus
+-- a path evaluator covering predicate / inverse / sequence / alternative
+-- / zero-or-more / one-or-more / zero-or-one. Targets: targetClass,
+-- targetNode, targetSubjectsOf, targetObjectsOf.
+SELECT rdf_shacl_core_validate(
+  'urn:g:data',     -- data graph (NULL = default graph)
+  'urn:g:shapes',   -- shapes graph (required)
+  'urn:g:report',   -- report graph (required; cleared before write)
+  json('{"max_violations": 10000, "provenance": false}')
+);
+-- => INTEGER (violation count; 0 = conforming)
+--
+-- Constraint coverage (12, matches VG ConstraintLibrary):
+--   sh:minCount, sh:maxCount, sh:datatype, sh:nodeKind, sh:class,
+--   sh:pattern (+ sh:flags i/s/m/x), sh:minLength, sh:maxLength,
+--   sh:in, sh:hasValue, sh:minInclusive, sh:maxInclusive.
+--
+-- Report graph schema: W3C-conformant sh:ValidationReport with one
+-- sh:ValidationResult per violation, carrying sh:focusNode,
+-- sh:resultPath, sh:value (when applicable), sh:sourceShape,
+-- sh:sourceConstraintComponent, sh:resultSeverity (always
+-- sh:Violation in 0.11.0), sh:resultMessage.
+--
+-- Options (all optional; defaults match vv-graph's Shacl convention):
+--   max_violations   : int   (default 10_000)
+--   provenance       : bool  (default false) — adds :reportedBy / :reportedAt
+--   reported_by_iri  : str   (default "urn:semantica:shacl:reportedBy")
+--   reported_at_iri  : str   (default "http://www.w3.org/ns/prov#generatedAtTime")
+--   shape_iri_prefix : str   (default "urn:semantica:shape:")
+--                            — prefix for blank-node shape IRIs in sh:sourceShape
+--
+-- Error envelopes (fixed-prefix for consumer pattern-matching):
+--   "rdf_shacl_core_validate: shapes_iri must be a named graph …"
+--   "rdf_shacl_core_validate: report_iri must be a named graph …"
+--   "rdf_shacl_core_validate: violation count exceeded max_violations (N)"
+--   "rdf_shacl_core_validate: sh:path must be an IRI or blank-node structure, …"
+--   "rdf_shacl_core_validate: property shape <…> has no sh:path"
+--
+-- Out of scope for 0.11.0:
+--   - SHACL-SPARQL constraints (sh:sparql) — different evaluation model.
+--   - SHACL Rules (sh:rule) — routes through 0.8.0 rdf_construct_many.
+--   - The remaining ~18 SHACL Core constraints in VG's PHASE_B_PENDING.
+--   - SHACL Advanced (sh:function, sh:expression).
 ```
 
 ### Virtual Table

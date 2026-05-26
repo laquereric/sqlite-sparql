@@ -1,6 +1,6 @@
 [package]
 name = "sqlite-sparql"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 authors = ["sqlite-sparql contributors"]
 description = "A SQLite loadable extension that embeds Oxigraph for RDF triple storage and SPARQL querying"
@@ -27,6 +27,9 @@ serde_json = "1"
 
 # Error handling
 thiserror = "1"
+
+# Regex for SHACL sh:pattern constraint (0.11.0).
+regex = "1"
 
 [dev-dependencies]
 # For integration tests via rusqlite

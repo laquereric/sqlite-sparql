@@ -364,7 +364,25 @@ and `docs/plans/PLAN_0.10.0.md` for the 0.10.0 expansion
 realised `eq-ref` non-convergence under provenance, the
 deferred-inconsistency follow-on plan).
 
-### 7. Native SHACL Core validator pass
+### 7. Native SHACL Core validator pass — LANDED in 0.11.0
+
+`rdf_shacl_core_validate(data_iri, shapes_iri, report_iri,
+options_json) → INTEGER` ships in 0.11.0 with the 12-constraint
+subset matching VG's `Vv::Graph::Shacl::ConstraintLibrary`
+(sh:minCount/maxCount/datatype/nodeKind/class/pattern/minLength/
+maxLength/in/hasValue/minInclusive/maxInclusive), a path
+evaluator covering predicate / inverse / sequence / alternative /
+zero-or-more / one-or-more / zero-or-one, and target resolution
+for sh:targetClass / sh:targetNode / sh:targetSubjectsOf /
+sh:targetObjectsOf. Report graph is cleared before each call.
+
+The remaining ~18 SHACL Core constraint components in VG's
+`PHASE_B_PENDING` defer to a future engine release — same
+lockstep posture as the OWL 2 RL rule-set (0.9.0 → 0.10.0). VG
+callers using out-of-subset constraints stay on the per-constraint
+`sparql_ask` path until then.
+
+See `docs/plans/PLAN_0.11.0.md` for the full design.
 
 **Originating Vv::Graph plan:** `docs/plans/PLAN_0.10.0.md` ("Engine
 prerequisites" → option 1: "Engine-side validator").

@@ -195,6 +195,15 @@ required:
   every derived triple when `provenance: true`. vv-graph driver
   (`Vv::Graph::Reasoner.materialise!` would route through this once
   the gem floor bumps to engine ≥ 0.10.0); no MM call site today.
+- `rdf_shacl_core_validate(data, shapes, report, options_json) →
+  INTEGER` (from 0.11.0) — native Rust SHACL Core validator. Walks
+  the data graph once per shape and emits a W3C-conformant
+  `sh:ValidationReport` into a named report graph. Ships the
+  12-constraint subset matching `vv-graph`'s
+  `Vv::Graph::Shacl::ConstraintLibrary` plus a 7-form path
+  evaluator. vv-graph driver (`Vv::Graph::Shacl.validate!` would
+  route through this once the gem floor bumps to engine ≥ 0.11.0);
+  no MM call site today.
 
 ## Behaviours MM does NOT depend on
 

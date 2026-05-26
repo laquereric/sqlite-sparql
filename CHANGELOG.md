@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.11.0 — Native SHACL Core validator pass
+
+`rdf_shacl_core_validate(data_iri, shapes_iri, report_iri,
+options_json) → INTEGER` lands as a new top-level scalar.
+Collapses what was previously N constraints × M focus-nodes worth
+of `sparql_ask` / `sparql_query` round-trips in the consumer
+(`Vv::Graph::Shacl.validate!`) into one FFI crossing: the engine
+walks the data graph once per shape, evaluates the per-property
+constraints natively, and writes a W3C-conformant
+`sh:ValidationReport` into a named report graph.
+
+Driver: `CONSUMER_REQUIREMENT_VvGraph.md` § "Requested
+extensions" item **#7 — Native SHACL Core validator pass**. VG's
+`Vv::Graph::Shacl.validate!` (PLAN_0.10.0 Phase B shipped on the
+gem side, commit `ed55ef4`) can now route through this surface
+instead of issuing per-constraint SPARQL round-trips.
+
+### Constraint coverage (12 components, parity with VG's `ConstraintLibrary`)
+
+| Group | Constraints |
+|---|---|
+| **Cardinality** | `sh:minCount`, `sh:maxCount` |
+| **Value type** | `sh:datatype`, `sh:nodeKind`, `sh:class` (with `rdfs:subClassOf*` walk) |
+| **String** | `sh:pattern` (+ `sh:flags` — `i`/`s`/`m`/`x`), `sh:minLength`, `sh:maxLength` |
+| **Value membership** | `sh:in`, `sh:hasValue` |
+| **Range** | `sh:minInclusive`, `sh:maxInclusive` |
+
+The remaining ~18 SHACL Core constraint components in VG's
+`PHASE_B_PENDING` defer to a future release — same lockstep
+posture as PLAN_0.10.0's rule-set / VG coverage relationship.
+
+### Path evaluator (7 forms)
+
+- **Predicate** — bare IRI in `sh:path`.
+- **Inverse** — `[ sh:inversePath :p ]`.
+- **Sequence** — `( :p1 :p2 … )` (RDF list of paths).
+- **Alternative** — `[ sh:alternativePath ( :p1 :p2 … ) ]`.
+- **Zero-or-more** — `[ sh:zeroOrMorePath :p ]` (reflexive
+  transitive closure).
+- **One-or-more** — `[ sh:oneOrMorePath :p ]` (transitive closure
+  without reflexive seed).
+- **Zero-or-one** — `[ sh:zeroOrOnePath :p ]`.
+
+### Target resolution
+
+`sh:targetClass` (walks `rdf:type` in the data graph),
+`sh:targetNode` (focus IRI verbatim), `sh:targetSubjectsOf`
+(every subject of a triple with the given predicate),
+`sh:targetObjectsOf` (every object). Shapes are also picked up
+via explicit `rdf:type sh:NodeShape` even when no target is
+declared.
+
+### Report contract
+
+The `report_iri` named graph is **cleared** before each call —
+re-validating overwrites rather than accumulates. The emitted
+graph contains a single `sh:ValidationReport` header node with
+`sh:conforms <true|false>^^xsd:boolean` and one `sh:result`
+edge per violation. Each `sh:ValidationResult` carries
+`sh:focusNode`, `sh:resultPath`, `sh:value` (when applicable),
+`sh:sourceShape`, `sh:sourceConstraintComponent`,
+`sh:resultSeverity` (always `sh:Violation` in 0.11.0), and
+`sh:resultMessage`.
+
+Blank-node shapes get a synthesised stable IRI in `sh:sourceShape`
+(`shape_iri_prefix + <bnode-id>`) so consumers can pattern-match
+without grokking blank-node identity.
+
+### Options
+
+| Option | Default | Purpose |
+|---|---|---|
+| `max_violations` | `10000` | Hard upper bound; call aborts with fixed-prefix error once exceeded |
+| `provenance` | `false` | Adds `:reportedBy` and `:reportedAt` triples on each `sh:ValidationResult` |
+| `reported_by_iri` | `urn:semantica:shacl:reportedBy` | Operator-overridable provenance predicate |
+| `reported_at_iri` | `http://www.w3.org/ns/prov#generatedAtTime` | Operator-overridable timestamp predicate |
+| `shape_iri_prefix` | `urn:semantica:shape:` | Blank-node-shape IRI prefix |
+
+### Error envelopes (fixed-prefix for consumer pattern-matching)
+
+- `rdf_shacl_core_validate: shapes_iri must be a named graph (NULL is not allowed)`
+- `rdf_shacl_core_validate: report_iri must be a named graph (NULL is not allowed for the report slot)`
+- `rdf_shacl_core_validate: violation count exceeded max_violations (N)`
+- `rdf_shacl_core_validate: sh:path must be an IRI or blank-node structure, …`
+- `rdf_shacl_core_validate: property shape <…> has no sh:path`
+- `rdf_shacl_core_validate: sh:path list has a cycle`
+- `rdf_shacl_core_validate: options_json: <serde error>`
+
+### Out of scope
+
+- **SHACL-SPARQL constraints** (`sh:sparql`) — arbitrary embedded
+  SPARQL; falls back to consumer-side `sparql_query` round-trips
+  anyway.
+- **SHACL Rules** (`sh:rule`) — `Vv::Graph::Shacl::Rules.materialise!`
+  already routes through 0.8.0's `rdf_construct_many`.
+- **SHACL Advanced** (`sh:function`, `sh:expression`) — out of the
+  SHACL Core profile.
+- **The remaining ~18 SHACL Core constraint components** — same
+  lockstep-with-VG posture as PLAN_0.10.0's rule-set.
+
+12 integration tests added (`test_rdf_shacl_core_validate_*`) +
+14 constraint unit tests + 11 path evaluator unit tests. Test
+count climbs by 37; full suite is green in both debug and
+release.
+
 ## 0.10.0 — Full OWL 2 RL derivation coverage (~45 additional rules)
 
 `rdf_owl_rl_materialise`'s rule library grows from 15 to 60 rules,

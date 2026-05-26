@@ -2299,4 +2299,479 @@ mod tests {
         }
         Ok(())
     }
+
+    // ── 0.11.0 rdf_shacl_core_validate ────────────────────────────────────────
+
+    /// Load a Turtle snippet into the named graph `g`. Convenience for
+    /// the SHACL tests, all of which need a shapes graph and a data graph.
+    fn load_turtle_to(conn: &Connection, g: &str, turtle: &str) -> Result<()> {
+        let _: i64 = conn.query_row(
+            "SELECT rdf_load_turtle_to_graph(?, ?)",
+            rusqlite::params![turtle, g],
+            |r| r.get(0),
+        )?;
+        Ok(())
+    }
+
+    /// Ergonomic SPARQL ASK that returns `bool` directly.
+    fn sparql_ask(conn: &Connection, q: &str) -> Result<bool> {
+        let n: i64 = conn.query_row("SELECT sparql_ask(?)", [q], |r| r.get(0))?;
+        Ok(n != 0)
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_min_count_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh:   <http://www.w3.org/ns/shacl#> .
+            @prefix ex:   <http://example.org/> .
+            @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:name ;
+                sh:minCount 1 ;
+              ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:name "Alice" .
+            ex:bob   a ex:Person .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 1);
+        assert!(sparql_ask(
+            &conn,
+            r#"ASK { GRAPH <urn:g:report> {
+                ?r <http://www.w3.org/ns/shacl#focusNode> <http://example.org/bob> ;
+                   <http://www.w3.org/ns/shacl#sourceConstraintComponent>
+                     <http://www.w3.org/ns/shacl#MinCountConstraintComponent>
+            } }"#,
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_datatype_violation() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh:   <http://www.w3.org/ns/shacl#> .
+            @prefix ex:   <http://example.org/> .
+            @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+            ex:AgeShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:age ;
+                sh:datatype xsd:integer ;
+              ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex:  <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:alice a ex:Person ; ex:age "30"^^xsd:integer .
+            ex:bob   a ex:Person ; ex:age "thirty" .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_full_shape_round_trip() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh:   <http://www.w3.org/ns/shacl#> .
+            @prefix ex:   <http://example.org/> .
+            @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:name ;
+                sh:minCount 1 ;
+              ] ;
+              sh:property [
+                sh:path ex:age ;
+                sh:datatype xsd:integer ;
+              ] ;
+              sh:property [
+                sh:path ex:code ;
+                sh:pattern "^[A-Z]{3}$" ;
+              ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex:  <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+            # Conforming
+            ex:alice a ex:Person ; ex:name "Alice" ; ex:age "30"^^xsd:integer ; ex:code "ABC" .
+            # Missing ex:name → minCount violation
+            ex:bob   a ex:Person ; ex:age "40"^^xsd:integer ; ex:code "DEF" .
+            # ex:age is a string → datatype violation. Also wrong code pattern.
+            ex:carol a ex:Person ; ex:name "Carol" ; ex:age "x" ; ex:code "abc" .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 3, "one minCount + one datatype + one pattern");
+        assert!(sparql_ask(
+            &conn,
+            r#"ASK { GRAPH <urn:g:report> {
+                ?report a <http://www.w3.org/ns/shacl#ValidationReport> ;
+                        <http://www.w3.org/ns/shacl#conforms>
+                          "false"^^<http://www.w3.org/2001/XMLSchema#boolean>
+            } }"#,
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_conforms_when_no_violations() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:name "Alice" .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 0);
+        assert!(sparql_ask(
+            &conn,
+            r#"ASK { GRAPH <urn:g:report> {
+                ?report <http://www.w3.org/ns/shacl#conforms>
+                  "true"^^<http://www.w3.org/2001/XMLSchema#boolean>
+            } }"#,
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_max_violations_guard() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:a a ex:Person . ex:b a ex:Person . ex:c a ex:Person .
+            "#,
+        )?;
+        let err = conn.query_row::<i64, _, _>(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report',
+                                            '{\"max_violations\": 1}')",
+            [],
+            |r| r.get(0),
+        );
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("max_violations"),
+            "expected max_violations error, got: {msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_data_iri_default_graph() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Data lands in default graph this time.
+        conn.execute_batch(
+            r#"
+            SELECT rdf_load_turtle('
+              @prefix ex: <http://example.org/> .
+              ex:alice a ex:Person .
+            ');
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate(NULL, 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_shapes_iri_required() -> Result<()> {
+        let conn = open_with_extension()?;
+        let err = conn.query_row::<i64, _, _>(
+            "SELECT rdf_shacl_core_validate('urn:g:data', NULL, 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        );
+        let msg = format!("{err:?}");
+        assert!(msg.contains("shapes_iri"), "got: {msg}");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_report_iri_required() -> Result<()> {
+        let conn = open_with_extension()?;
+        let err = conn.query_row::<i64, _, _>(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', NULL, '{}')",
+            [],
+            |r| r.get(0),
+        );
+        let msg = format!("{err:?}");
+        assert!(msg.contains("report_iri"), "got: {msg}");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_clears_report_on_rewrite() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob a ex:Person .
+            "#,
+        )?;
+        // First run — produces violations.
+        let _: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        // Now fix the data and re-validate; report should be cleared
+        // and reflect the new state, not accumulate.
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob ex:name "Bob" .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 0);
+        // No stale ValidationResult nodes from the prior run.
+        let stale: i64 = conn.query_row(
+            r#"SELECT sparql_ask('ASK { GRAPH <urn:g:report> {
+                ?r a <http://www.w3.org/ns/shacl#ValidationResult>
+            } }')"#,
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(stale, 0, "rewrite should clear prior ValidationResult nodes");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_path_inverse() -> Result<()> {
+        let conn = open_with_extension()?;
+        // Shape targets ex:Person and requires `^ex:parent` to have
+        // at least one value — i.e. every Person must be someone's parent.
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:ParentShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path [ sh:inversePath ex:parent ] ;
+                sh:minCount 1 ;
+              ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person .
+            ex:bob   a ex:Person .   # is a parent of nobody → violation
+            ex:carol a ex:Person ;   # is a parent (via inverse path)
+                     ex:parent ex:alice .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        // alice's inverse-parent set = {carol}; bob's = {}; carol's = {}.
+        // So bob AND carol violate. (carol has ex:parent but no one has
+        // ex:parent → carol.)
+        assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_path_sequence() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:GrandparentShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ( ex:parent ex:parent ) ;
+                sh:minCount 1 ;
+              ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:parent ex:bob .
+            ex:bob   a ex:Person ; ex:parent ex:carol .
+            ex:carol a ex:Person .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        // alice has a grandparent (carol). bob and carol don't. Two violations.
+        assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn test_rdf_shacl_core_validate_in_constraint() -> Result<()> {
+        let conn = open_with_extension()?;
+        load_turtle_to(
+            &conn,
+            "urn:g:shapes",
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:RoleShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [
+                sh:path ex:role ;
+                sh:in ( "admin" "editor" "viewer" ) ;
+              ] .
+            "#,
+        )?;
+        load_turtle_to(
+            &conn,
+            "urn:g:data",
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:role "admin" .
+            ex:bob   a ex:Person ; ex:role "hacker" .
+            "#,
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT rdf_shacl_core_validate('urn:g:data', 'urn:g:shapes', 'urn:g:report', '{}')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
 }

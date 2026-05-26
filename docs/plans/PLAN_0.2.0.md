@@ -175,7 +175,7 @@ roadmap looks like:
 | 0.8.0 | Batched CONSTRUCT (`rdf_construct_many`) | `PLAN_0.8.0.md` |
 | 0.9.0 | Native OWL 2 RL pass (15-rule subset) | `PLAN_0.9.0.md` |
 | 0.10.0 | Full OWL 2 RL derivation coverage (60 rules) | `PLAN_0.10.0.md` |
-| 0.11.0 | Native SHACL Core validator (VG CR #7) | `PLAN_0.11.0.md` |
+| 0.11.0 | Native SHACL Core validator (12-constraint subset, VG CR #7) | `PLAN_0.11.0.md` |
 | 0.12.0 | Native DRed dependency index (VG CR #8) | `PLAN_0.12.0.md` |
 | 0.13.0 | OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) | deferred from 0.10.0 |
 | 0.14.0 | `sqlite-sparql-ruby` gem wrapper | (future) |

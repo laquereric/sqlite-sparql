@@ -271,6 +271,55 @@ within `max_iterations` (default 50), error with the prefix
 and leave the partially-derived state in the inferred graph for
 inspection.
 
+### SHACL Core validation (since 0.11.0)
+
+For validation workloads, `rdf_shacl_core_validate` evaluates a
+SHACL Core shapes graph against a data graph in one FFI crossing,
+emitting a W3C-conformant `sh:ValidationReport` into a named
+report graph:
+
+```sql
+SELECT rdf_shacl_core_validate(
+  'urn:g:data',       -- data graph (NULL = default graph)
+  'urn:g:shapes',     -- shapes graph (required)
+  'urn:g:report',     -- report graph (required; cleared before write)
+  '{}'                -- options JSON
+);
+-- => INTEGER (violation count; 0 = conforming)
+```
+
+0.11.0 ships the 12-constraint subset matching `vv-graph`'s
+`Vv::Graph::Shacl::ConstraintLibrary`: `sh:minCount`,
+`sh:maxCount`, `sh:datatype`, `sh:nodeKind`, `sh:class`,
+`sh:pattern` (+ `sh:flags`), `sh:minLength`, `sh:maxLength`,
+`sh:in`, `sh:hasValue`, `sh:minInclusive`, `sh:maxInclusive`.
+The path evaluator handles predicate, inverse (`sh:inversePath`),
+sequence (`( :p1 :p2 )`), alternative (`sh:alternativePath`),
+zero-or-more / one-or-more / zero-or-one paths. Targets:
+`sh:targetClass`, `sh:targetNode`, `sh:targetSubjectsOf`,
+`sh:targetObjectsOf`.
+
+The report graph is **cleared** before each call — re-validating
+overwrites rather than accumulates. Documented loudly because it
+deviates from the "engine emits, consumer decides where it lands"
+posture: the report is the call's own output, so engine-managed
+graph state is acceptable.
+
+Options (all optional; defaults pin parity with `vv-graph`):
+
+| Option | Default | Purpose |
+|---|---|---|
+| `max_violations` | `10000` | Safety guard; the call aborts with a fixed-prefix error once exceeded |
+| `provenance` | `false` | Adds `:reportedBy` and `:reportedAt` triples on each `sh:ValidationResult` |
+| `reported_by_iri` | `urn:semantica:shacl:reportedBy` | Predicate for the "reported by" provenance triple |
+| `reported_at_iri` | `http://www.w3.org/ns/prov#generatedAtTime` | Predicate for the report timestamp |
+| `shape_iri_prefix` | `urn:semantica:shape:` | Prefix synthesised for blank-node shape IRIs in `sh:sourceShape` |
+
+`shapes_iri = NULL` and `report_iri = NULL` are both rejected with
+fixed-prefix errors so consumers can pattern-match. `data_iri =
+NULL` means the default graph (same convention as
+`rdf_owl_rl_materialise`).
+
 ### Bulk Load (Turtle)
 
 ```sql
@@ -469,7 +518,8 @@ wraps it in `OnceLock` only for lazy initialisation.
 - [x] Batched CONSTRUCT (`rdf_construct_many`) — landed in 0.8.0
 - [x] Native OWL 2 RL fixpoint pass (15-rule subset) — landed in 0.9.0
 - [x] Full OWL 2 RL derivation coverage (60 rules) — landed in 0.10.0
-- [ ] Native SHACL Core validator pass — PLAN_0.11.0 (VG CR #7)
+- [x] Native SHACL Core validator pass (12-constraint subset matching
+      VG `ConstraintLibrary`, 7 path forms) — landed in 0.11.0
 - [ ] Native dependency index for DRed — PLAN_0.12.0 (VG CR #8)
 - [ ] OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`) — future
 - [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
