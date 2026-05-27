@@ -223,6 +223,14 @@ required:
   inserts into the store. vv-graph driver
   (`Vv::Graph::Reasoner.consistent?` once that lands gem-side);
   no MM call site today.
+- `sqlite-sparql` Ruby gem (in-tree `ruby/` subdirectory, since
+  0.14.0). Loader (`SqliteSparql.load(db)`), ergonomic `Store`
+  wrapper, and `HasRdfTriples` AR concern. MM continues to load
+  the cdylib via Rails 8's `extensions:` config key (through
+  `vv-graph`); the new gem is available as an alternative for
+  non-Rails Ruby consumers but doesn't change MM's wiring path.
+  Not yet on RubyGems (waits on cross-platform binary
+  distribution); no MM call site today.
 
 ## Behaviours MM does NOT depend on
 

@@ -482,6 +482,63 @@ class KnowledgeGraph
 end
 ```
 
+## Ruby (`sqlite-sparql` gem, since 0.14.0)
+
+For Ruby applications outside Rails — or Rails apps that want the
+ergonomic helpers without inheriting the `extensions:` plumbing —
+the in-tree `ruby/` subdirectory ships a companion gem:
+
+```ruby
+require "sqlite3"
+require "sqlite_sparql"
+
+db = SQLite3::Database.new(":memory:")
+SqliteSparql.load(db)
+
+# Ergonomic wrapper covering every SQL surface — triples, SPARQL,
+# materialise, consistent, SHACL, DRed — returning native Ruby types.
+store = SqliteSparql::Store.new(db)
+store.insert("<urn:alice>", "<urn:knows>", "<urn:bob>")
+store.sparql("SELECT ?o WHERE { <urn:alice> ?p ?o }")
+store.materialise(inferred: "urn:g:inferred",
+                  options: { "track_dependencies" => true })
+store.consistent?(inferred: "urn:g:inferred")
+```
+
+For Rails models, the optional-require AR concern:
+
+```ruby
+require "sqlite_sparql/has_rdf_triples"
+
+class Knowledge < ApplicationRecord
+  include SqliteSparql::HasRdfTriples
+
+  def sync_to_rdf_store
+    rdf_store.insert(subject_iri, predicate_iri, object_iri)
+  end
+
+  def remove_from_rdf_store
+    rdf_store.delete(subject_iri, predicate_iri, object_iri)
+  end
+end
+
+Knowledge.sparql("SELECT ?s WHERE { ?s a <urn:Person> }")
+Knowledge.materialise(inferred: "urn:g:inferred")
+```
+
+Build and install from source (not yet on RubyGems — cross-platform
+pre-built binaries land in a follow-on plan):
+
+```bash
+cd ruby
+bundle install
+rake native       # cargo build --release + vendor host binary
+rake build        # produces sqlite-sparql-0.14.0.gem
+gem install ./sqlite-sparql-0.14.0.gem
+```
+
+See `ruby/README.md` for the full gem documentation.
+
 ---
 
 ## N-Triples Term Syntax
@@ -644,7 +701,10 @@ wraps it in `OnceLock` only for lazy initialisation.
       — landed in 0.12.0
 - [x] OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`,
       all 17 W3C inconsistency rules) — landed in 0.13.0
-- [ ] Ruby gem wrapper (`sqlite-sparql-ruby`) with pre-built binaries
+- [x] Ruby gem wrapper (`ruby/` subdirectory: loader, `Store`,
+      `HasRdfTriples` AR concern, 24-test minitest suite) —
+      landed in 0.14.0. Cross-platform pre-built binaries +
+      RubyGems publication queued as a follow-on plan.
 - [ ] SPARQL Protocol HTTP endpoint middleware for Rails
 - [ ] Persistent store via Oxigraph's RocksDB backend — *deferred,
       no consumer pressure; revive on first ask*

@@ -1,5 +1,139 @@
 # Changelog
 
+## 0.14.0 — `sqlite-sparql-ruby` gem wrapper
+
+Ships a companion Ruby gem under a new top-level `ruby/`
+subdirectory. The engine and its first-party language wrapper
+now version together — `lib/sqlite_sparql/version.rb` pins to
+the same string as the engine `VERSION` file and the test
+suite asserts equality (`test_version.rb`).
+
+Driver: `CLAUDE.md` item #11 ("Rails Gem Wrapper") — the stub
+that's been on the roadmap since 0.1.0. With 0.13.0's
+`rdf_owl_rl_consistent` rounding out the reasoning surface, the
+engine has stabilised enough for a language wrapper to make
+sense. Forward-leaning ship per the project pattern.
+
+### Surface
+
+```ruby
+require "sqlite3"
+require "sqlite_sparql"
+
+db = SQLite3::Database.new(":memory:")
+SqliteSparql.load(db)
+
+# Now every engine SQL function is callable from this connection:
+db.execute("SELECT rdf_insert(?, ?, ?)",
+           ["<urn:a>", "<urn:b>", "<urn:c>"])
+db.get_first_value("SELECT rdf_count()")  # => 1
+```
+
+Plus the ergonomic `SqliteSparql::Store` wrapper that covers
+every SQL surface — `#insert` / `#delete` / `#sparql` / `#ask` /
+`#construct` / `#update` / `#load_turtle` / `#materialise` /
+`#consistent?` / `#consistency_violations` / `#shacl_validate` /
+`#dred_overdelete` — returning native Ruby types (Integer,
+Array<Hash>, Boolean, String) instead of forcing JSON parses
+at the call site.
+
+Plus `SqliteSparql::HasRdfTriples` — an optional-require
+ActiveRecord concern that wires class-level delegators
+(`Model.sparql`, `Model.materialise`, `Model.consistent?`) plus
+`after_create` / `after_destroy` lifecycle hooks that call the
+model's own `sync_to_rdf_store` / `remove_from_rdf_store`
+instance methods if defined.
+
+### Loader internals
+
+The Ruby `sqlite3` gem 2.x's `db.load_extension(path)` dropped
+the explicit-entrypoint parameter and now relies on SQLite's
+filename-based auto-derivation. SQLite computes the entrypoint
+as `sqlite3_<basename>_init` where `<basename>` is the cdylib
+filename minus `lib` prefix and file extension.
+
+The engine's entrypoint is `sqlite3_sqlitesparql_init` (no
+underscore between "sqlite" and "sparql"), so the vendored
+cdylib is **renamed** at vendor-copy time:
+`libsqlite_sparql.{dylib,so,dll}` → `libsqlitesparql.{ext}`.
+`rake native` does this rename. For dev workflows pointing at
+`target/release/libsqlite_sparql.{ext}` via
+`ENV["SQLITE_SPARQL_CDYLIB"]`, the loader has a dev-rewrap
+fallback that hardlinks/copies to a temp `libsqlitesparql.{ext}`
+basename on first use — memoised per process.
+
+### Directory layout
+
+```
+ruby/
+├── Gemfile
+├── Rakefile             # rake native | rake build | rake test
+├── sqlite-sparql.gemspec
+├── README.md
+├── lib/
+│   ├── sqlite_sparql.rb         # entrypoint + loader
+│   └── sqlite_sparql/
+│       ├── version.rb           # pinned to engine VERSION
+│       ├── store.rb             # ergonomic wrapper
+│       └── has_rdf_triples.rb   # AR concern (optional require)
+├── vendor/                      # .gitignored; populated by rake native
+│   └── <arch>-<os>/
+│       └── libsqlitesparql.{dylib,so,dll}
+└── test/                        # minitest; 24 runs, 44 assertions
+    ├── test_helper.rb
+    ├── test_loader.rb
+    ├── test_store.rb
+    ├── test_has_rdf_triples.rb
+    └── test_version.rb
+```
+
+### Build prerequisites
+
+The gem requires a local `cargo build --release` of the engine
+to produce the cdylib that `rake native` then vendors. The
+gemspec does not list Rust as a dependency — it's assumed the
+engine repo has been built. Cross-platform fat-gem distribution
+(mac-arm64 + mac-x86_64 + linux-x86_64 + linux-arm64 +
+linux-musl + windows-x86_64) via GitHub Releases is the next
+plan; until then, consumers either build from source or wait.
+
+### Tests
+
+`bundle exec rake test` runs 24 minitests with 44 assertions
+covering:
+
+- Loader (idempotency, path resolution, smoke round-trip)
+- Store (insert/delete/count, named graphs, SPARQL select/ask/
+  construct, batched insert/delete, Turtle loading, OWL 2 RL
+  materialise, OWL 2 RL inconsistency, SHACL validate, DRed
+  overdelete, term helpers)
+- AR concern (lifecycle hooks fire, class delegators work for
+  sparql/materialise/consistent)
+- Version (gem VERSION matches engine VERSION)
+
+### Not in 0.14.0
+
+- **RubyGems publication.** Holds until cross-platform binary
+  distribution lands — publishing a gem that requires a Rust
+  toolchain on the consumer side is a non-starter.
+- **Cross-platform binary distribution.** A
+  `.github/workflows/release-binaries.yml` that builds for all
+  major platforms on tag push and uploads to GitHub Releases.
+  Tied to a downstream plan (PLAN_0.14.1 or PLAN_0.15.x).
+- **Rails generator.** `bin/rails g sqlite_sparql:install` to
+  drop a `config/initializers/sqlite_sparql.rb`. Future polish.
+- **JRuby / TruffleRuby.** MRI-only in 0.14.0.
+- **SPARQL HTTP endpoint middleware.** That's PLAN_0.15.0.
+
+### vv-graph posture
+
+`vv-graph` continues to load the extension via Rails 8's
+`extensions:` config key today. The new gem doesn't replace
+that — it complements it for non-Rails Ruby consumers who
+don't have a `config/database.yml`. VG could potentially
+switch to `SqliteSparql.load(db)` to gain the ergonomic
+helpers, but there's no consumer ask; current path stays.
+
 ## 0.13.0 — Native OWL 2 RL inconsistency detection
 
 `rdf_owl_rl_consistent(asserted_iri, inferred_iri, options_json) →

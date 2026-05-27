@@ -178,7 +178,7 @@ roadmap looks like:
 | 0.11.0 | Native SHACL Core validator (12-constraint subset, VG CR #7) | `PLAN_0.11.0.md` |
 | 0.12.0 | Native DRed dependency index — 5 core rules tracked (VG CR #8) | `PLAN_0.12.0.md` |
 | 0.13.0 | OWL 2 RL inconsistency detection (`rdf_owl_rl_consistent`, all 17 rules) | `PLAN_0.13.0.md` |
-| 0.14.0 | `sqlite-sparql-ruby` gem wrapper | (future) |
+| 0.14.0 | `sqlite-sparql-ruby` gem wrapper (ruby/ subdir; loader + Store + AR concern) | `PLAN_0.14.0.md` |
 | 0.15.0 | SPARQL HTTP endpoint | (future) |
 | Deferred | Persistent RocksDB backend via `rdf_open(path)` | revive on first consumer ask |
 | Deferred | Differential dataflow at store layer (VG CR #10) | out-of-reach for incremental engine work |

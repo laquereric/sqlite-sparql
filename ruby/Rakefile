@@ -1,0 +1,57 @@
+require "rake"
+require "rake/testtask"
+
+ENGINE_ROOT = File.expand_path("..", __dir__)
+
+def host_platform_dir
+  "#{Gem::Platform.local.cpu}-#{Gem::Platform.local.os}"
+end
+
+def host_library_extension
+  case Gem::Platform.local.os
+  when /darwin/                      then "dylib"
+  when /linux|bsd/                   then "so"
+  when /mingw|mswin|cygwin/          then "dll"
+  else raise "unsupported platform: #{Gem::Platform.local.os}"
+  end
+end
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "lib"
+  t.libs << "test"
+  t.test_files = FileList["test/test_*.rb"]
+  t.warning = false
+end
+
+desc "Build the engine cdylib via cargo (release profile)"
+task :cargo do
+  sh "cd #{ENGINE_ROOT} && cargo build --release"
+end
+
+desc "Vendor the host-platform cdylib into vendor/<arch>-<os>/"
+task native: :cargo do
+  ext = host_library_extension
+  target_dir = "vendor/#{host_platform_dir}"
+  mkdir_p target_dir
+  src = File.join(ENGINE_ROOT, "target", "release", "libsqlite_sparql.#{ext}")
+  # Rename to libsqlitesparql.{ext} (no underscore) so SQLite's
+  # filename-based entrypoint auto-derivation produces
+  # `sqlite3_sqlitesparql_init` — see lib/sqlite_sparql.rb for the
+  # full rationale.
+  dst = File.join(target_dir, "libsqlitesparql.#{ext}")
+  cp src, dst
+  puts "vendored #{src} → #{dst}"
+end
+
+desc "Build the gem with the vendored host-platform binary"
+task build: :native do
+  sh "gem build sqlite-sparql.gemspec"
+end
+
+desc "Remove vendored binaries and built gems"
+task :clean do
+  rm_rf "vendor"
+  Dir["sqlite-sparql-*.gem"].each { |f| rm f }
+end
+
+task default: :test

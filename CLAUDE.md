@@ -209,11 +209,32 @@ RocksDB-backed persistent store) and expose the path via a
 `rdf_open(path TEXT)` SQL function or an extension argument. Revive
 on first consumer ask.
 
-### 11. Rails Gem Wrapper (`sqlite-sparql-ruby`)
-Create a companion Ruby gem that:
-- Ships the pre-compiled `.dylib`/`.so` for common platforms
-- Exposes a `SqliteSparql.load(db)` method (mirroring `sqlite-vec`'s pattern)
-- Provides an ActiveRecord concern `HasRdfTriples` for model-level helpers
+### 11. Rails Gem Wrapper (`sqlite-sparql-ruby`) — DONE in 0.14.0
+Companion Ruby gem under a new top-level `ruby/` subdirectory of the
+engine repo so engine + wrapper version together. Exposes
+`SqliteSparql.load(db)` (mirrors `sqlite-vec`'s pattern), plus an
+ergonomic `SqliteSparql::Store` wrapper covering every SQL surface
+(triples, SPARQL, materialise, consistent, SHACL, DRed) returning
+native Ruby types, plus an optional-require
+`SqliteSparql::HasRdfTriples` ActiveRecord concern with class-level
+query delegators + `after_create`/`after_destroy` lifecycle hooks.
+
+**Vendored cdylib filename.** The Ruby `sqlite3` gem 2.x's
+`#load_extension(path)` lost its explicit-entrypoint parameter and
+now relies on SQLite's filename-based auto-derivation. SQLite computes
+`sqlite3_<basename>_init` where `<basename>` is the cdylib filename
+minus `lib` prefix and file extension. The engine's entrypoint is
+`sqlite3_sqlitesparql_init` (no underscore), so the vendored cdylib
+is renamed at vendor-copy time: `libsqlite_sparql.{ext}` →
+`libsqlitesparql.{ext}`. `rake native` does the rename; a dev-rewrap
+fallback in the loader hardlinks `target/release/libsqlite_sparql.{ext}`
+to a temp `libsqlitesparql.{ext}` path when needed.
+
+**Not yet on RubyGems.** Cross-platform fat-gem distribution via
+GitHub Releases is a follow-on plan; publishing waits on that so
+consumers don't need a Rust toolchain. 24 minitests / 44 assertions
+pass locally via `bundle exec rake test`. See `docs/plans/PLAN_0.14.0.md`,
+`ruby/README.md`, and `ruby/lib/sqlite_sparql.rb`.
 
 ### 12. SPARQL Endpoint Middleware
 Add a Rack/Rails middleware that exposes a `/sparql` HTTP endpoint accepting
