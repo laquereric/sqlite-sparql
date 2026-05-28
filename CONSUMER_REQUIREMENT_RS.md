@@ -191,7 +191,15 @@ Free to evolve without coordination:
   defaults to per-process persistence or per-file persistence, that's
   observable to RS only as "store contents persist across process
   restarts" — which RS handles fine (the sentinel + Loader
-  idempotency already cover this case).
+  idempotency already cover this case). **Substrate note:** MM's
+  fast-path architecture (`docs/plans/PLAN_0_93_2.md`) now treats the
+  per-process in-memory store as **load-bearing**, not a stopgap — the
+  RDF graph is per-process by design and the Rails Event Store log is
+  the shared truth that each tier projects into its own store. RS is
+  the Ruby **governed-writer** tier in that model (it appends domain
+  state through the SQL surface above); the per-process model does not
+  change any function contract RS consumes. See
+  `CONSUMER_REQUIREMENT_MM.md` § "Shared-file / in-memory-store caveat".
 - **RDF-star / SPARQL-star round-trip (available from 0.7.0)** —
   quoted-triple terms (`<< s p o >>`) round-trip through every read
   and write path; SPARQL-star syntax flows straight through to

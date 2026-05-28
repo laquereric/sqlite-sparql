@@ -18,6 +18,10 @@ about this file.
 - MM plan that introduced the dependency: `docs/plans/PLAN_0_29_1.md`
 - MM plan that landed the rename sweep: `docs/plans/PLAN_0_82_0.md`
 - MM plan that authored this CR refresh: `docs/plans/PLAN_0_91_0.md`
+- MM plan that pins the fast-path architecture this CR now records:
+  `docs/plans/PLAN_0_93_2.md` (RES-as-shared-truth; per-process in-memory
+  store; write-ownership). Reconciled into this file per
+  `docs/plans/PLAN_0_93_3.md` §1.
 - Intermediate consumer: `vv-graph` (its
   `CONSUMER_REQUIREMENT_VvGraph.md` — sibling of this file — covers
   the gem-level surface)
@@ -122,9 +126,70 @@ load. MM depends on:
   extension changes its thread / connection assumptions (currently
   thread-local Oxigraph store, per `CLAUDE.md`), the gem must adapt — and
   MM must see no behavioural change at the `Vv::Graph::Sparql` envelope.
-- **Per-connection store isolation is acceptable for v0.29.x.** MM's V0.29.x
-  scope does not require cross-connection store sharing. If upstream adds a
-  shared / persistent store later, MM will adopt opportunistically.
+- **Per-connection store isolation is acceptable for v0.29.x — and is now
+  load-bearing, not just tolerated.** MM's V0.29.x scope does not require
+  cross-connection store sharing. As of `docs/plans/PLAN_0_93_2.md` the
+  per-process in-memory store is no longer treated as a limitation MM merely
+  waits out: it is the foundation of the fast-path architecture (the graph is
+  per-process by design; RES is the shared truth). See the next section. A
+  future shared / persistent store remains an *optimization* MM may adopt
+  opportunistically, not a prerequisite.
+
+## Shared-file / in-memory-store caveat (the fast-path architecture)
+
+This section records the one architectural fact about this extension that
+MM's fast-path design (`docs/plans/PLAN_0_93_2.md`) **relies on** — and the
+trap it deliberately avoids. It pins a *consumer expectation about the
+store's sharing model*, not a new SQL surface.
+
+- **The RDF graph is per-process; the shared SQLite file does NOT share it.**
+  Oxigraph runs as **one in-memory store per process** (thread-local here,
+  per `CLAUDE.md`). Two processes opening the **same** SQLite file get **two
+  independent graphs** — ordinary tables and `sqlite-vec` vectors are
+  file-shareable (real SQLite pages, WAL = many readers + one writer), but
+  RDF triples / SPARQL are **not**. MM does not assume otherwise. The
+  intuitive "share one SQLite file and Rust sees Ruby's triples" **does not
+  hold** against this extension today.
+
+- **RES is the shared truth for the graph (M2 + M3).** Because the graph is
+  per-process, the shared, durable, ordered source of truth is the **[Rails
+  Event Store](https://railseventstore.org/) event log**, stored as ordinary
+  SQLite tables in the shared file. Ruby (the governed writer) appends domain
+  events; **every tier projects those events into its own in-memory Oxigraph
+  store** (a triple-delta projection). A process restart rebuilds its graph
+  by replaying the log. This is not a workaround — the in-memory store *makes
+  it the only coherent model* (the graph must be rebuilt from *somewhere*;
+  RES is that somewhere). MM consumes this extension's write + query surface
+  (`rdf_insert`/`rdf_insert_many`/`sparql_query`/…) **per tier**, against that
+  tier's own projected store; it does not expect cross-process graph reads
+  through the file.
+
+- **Write-ownership is partitioned — no two writers (M1).** SQLite is
+  single-writer (WAL = many readers + one writer). MM partitions writes so
+  one writer owns each row-space: **governed domain state is written by
+  Ruby** (through `vv-graph` → this extension); **ephemeral / spatial sim
+  state is owned by Rust** (Nexus, `vendor/vv-multiplayer`); **identity is
+  never stored in the sim tier** — it is resolved from the substrate. The
+  RES log is append-only (writer = whoever owns the aggregate). This
+  extension is consumed on **both** sides of that partition (Ruby for
+  governed writes, Rust for the hot read/compute path) — each over its own
+  per-process store, both fed by the one RES log.
+
+- **The browser tier is a replica, not a sharer (M4).** A browser cannot
+  mmap a host's SQLite file; it runs SQLite/Oxigraph in WASM over OPFS,
+  subscribes to the RES stream over the `docs/plans/PLAN_0_93_1.md` S2
+  transport, and replays into a local store. Strong consistency within the
+  host (file + WAL); eventual consistency for the browser (replay). Whether
+  the browser loads this `cdylib` in WASM or uses the Oxigraph-WASM build
+  directly is an open spike (`PLAN_0_93_2` S4) — either way MM consumes the
+  same SPARQL surface, never an authoritative cross-tier file share.
+
+- **Persistence backend is still deferred — and that is now an explicit
+  decision, not a gap.** `PLAN_0_93_2` S5 records the trade-off: RES-replay
+  is the default (ships now); the deferred Oxigraph RocksDB backend (this
+  repo, item #10 in `CLAUDE.md`) is an optimization that would let co-located
+  Ruby + Rust share the graph *through the file*, making per-tier projection
+  optional for the host tier. MM does not block on it.
 
 ## Oxigraph semantics MM depends on
 
@@ -361,4 +426,9 @@ For questions about MM's consumption pattern, see MM's
 
 ## Last reviewed
 
-2026-05-25 against MM substrate commit `e66aa9d` per `docs/plans/PLAN_0_91_0.md` (Phase A).
+- 2026-05-28 — reconciled against `docs/plans/PLAN_0_93_1.md` and
+  `docs/plans/PLAN_0_93_2.md` per `docs/plans/PLAN_0_93_3.md` §1 (added the
+  shared-file / in-memory-store caveat + write-ownership M1). The MM
+  substrate pin-bump commit for this reconciliation is stamped HERE in MM at
+  pin-bump time (per `PLAN_0_93_3` §6 lockstep doctrine).
+- 2026-05-25 against MM substrate commit `e66aa9d` per `docs/plans/PLAN_0_91_0.md` (Phase A).

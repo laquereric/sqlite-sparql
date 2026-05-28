@@ -194,7 +194,15 @@ Free to evolve without coordination:
   defaults to per-process persistence or per-file persistence, that's
   observable to Vv::Graph only as "store contents persist across process
   restarts" — which Vv::Graph handles fine (the sentinel + Loader
-  idempotency already cover this case).
+  idempotency already cover this case). **Substrate note:** MM's
+  fast-path architecture (`docs/plans/PLAN_0_93_2.md`) now treats the
+  per-process in-memory store as **load-bearing**, not a stopgap — the
+  RDF graph is per-process by design and the Rails Event Store log is
+  the shared truth that each tier projects into its own store. Vv::Graph
+  is the Ruby **governed-writer** tier in that model (it appends domain
+  state through the SQL surface above); the per-process model does not
+  change any function contract Vv::Graph consumes. See
+  `CONSUMER_REQUIREMENT_MM.md` § "Shared-file / in-memory-store caveat".
 - **RDF-star / SPARQL-star round-trip (available from 0.7.0)** —
   quoted-triple terms (`<< s p o >>`) round-trip through every read
   and write path; SPARQL-star syntax flows straight through to
@@ -528,4 +536,10 @@ or open an issue on the Vv::Graph repo.
 
 ## Last reviewed
 
-2026-05-25 against MM substrate commit `e66aa9d` per `docs/plans/PLAN_0_91_0.md` (Phase A).
+- 2026-05-28 — reconciled against `docs/plans/PLAN_0_93_2.md` per
+  `docs/plans/PLAN_0_93_3.md` §1 (substrate note: per-process in-memory store
+  is load-bearing; Vv::Graph is the Ruby governed-writer tier; RES is the
+  shared truth). The MM substrate pin-bump commit for this reconciliation is
+  stamped HERE in MM at pin-bump time (per `PLAN_0_93_3` §6 lockstep
+  doctrine).
+- 2026-05-25 against MM substrate commit `e66aa9d` per `docs/plans/PLAN_0_91_0.md` (Phase A).
